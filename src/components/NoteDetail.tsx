@@ -171,14 +171,39 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
     const eoQuotaLeft = eoLimit - eoUsedThisWeek;
 
     useEffect(() => {
-        loadContent();
-    }, [localNote.id]);
+        let cancelled = false;
 
-    const loadContent = async () => {
-        const decryptedContent = await store.getNoteContent(localNote.id);
-        setContent(decryptedContent);
-        setIsLoading(false);
-    };
+        const loadContent = async () => {
+            setIsLoading(true);
+
+            if (isUnsaved) {
+                setContent(note.content || '');
+                setIsLoading(false);
+                return;
+            }
+
+            try {
+                const decryptedContent = await store.getNoteContent(localNote.id);
+                if (!cancelled) {
+                    setContent(decryptedContent);
+                }
+            } catch (err) {
+                console.error('Failed to load note content:', err);
+                if (!cancelled) {
+                    setContent('');
+                }
+            } finally {
+                if (!cancelled) {
+                    setIsLoading(false);
+                }
+            }
+        };
+
+        loadContent();
+        return () => {
+            cancelled = true;
+        };
+    }, [localNote.id, isUnsaved, note.content]);
 
     const handleSaveTitle = async () => {
         const result = await store.updateTitle(localNote.id, title);

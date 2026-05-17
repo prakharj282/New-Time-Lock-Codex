@@ -97,11 +97,12 @@ function App() {
   };
 
   const handleCreateNote = () => {
+    const now = Date.now();
     const newNote: AppNote = {
       id: crypto.randomUUID(),
       title: 'New Note',
       content: '',
-      createdAt: Date.now(),
+      createdAt: now,
       lockedUntil: null,
       emergencyLength: null,
       hideTypos: false,
@@ -109,13 +110,13 @@ function App() {
       emergencyOpenPerWeek: 0,
       emergencyOpenLog: [],
       schedule: { enabled: false, days: [], slots: [] },
-      updatedAt: Date.now(),
+      updatedAt: now,
       deletedAt: null,
       restricted: false,
     };
+    setNotes(prev => [...prev, newNote]);
     setActiveNoteId(newNote.id);
     setUnsavedNoteIds(prev => new Set(prev).add(newNote.id));
-    setNotes([...notes, newNote]);
   };
 
   const activeNote = notes.find((n) => n.id === activeNoteId);
@@ -152,9 +153,9 @@ function App() {
       )}
 
       <main>
-        {activeNoteId ? (
+        {activeNoteId && activeNote ? (
           <NoteDetail
-            note={activeNote!}
+            note={activeNote}
             isUnsaved={unsavedNoteIds.has(activeNoteId!)}
             onBack={() => {
               setUnsavedNoteIds(prev => {
@@ -166,6 +167,8 @@ function App() {
               loadNotes();
             }}
           />
+        ) : activeNoteId ? (
+          <div className="loading-spinner">Loading...</div>
         ) : (
           <NoteList notes={notes} onSelectNote={setActiveNoteId} />
         )}
