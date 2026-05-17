@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import { Pool } from 'pg';
 import crypto from 'crypto';
@@ -5,7 +6,13 @@ import crypto from 'crypto';
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
-function requireEnv(name: 'DATABASE_URL' | 'ENCRYPTION_KEY'): string {
+type EnvName = 'DATABASE_URL' | 'ENCRYPTION_KEY';
+
+function missingEnvVars(): EnvName[] {
+  return (['DATABASE_URL', 'ENCRYPTION_KEY'] as EnvName[]).filter(name => !process.env[name]);
+}
+
+function requireEnv(name: EnvName): string {
   const value = process.env[name];
   if (!value) {
     throw new Error(`${name} environment variable is required`);
@@ -139,6 +146,41 @@ export function ensureDatabaseInitialized(): Promise<void> {
   return databaseInitPromise;
 }
 
+app.get('/api/health', async (_req, res) => {
+  const missing = missingEnvVars();
+  if (missing.length > 0) {
+    return res.status(503).json({ ok: false, missingEnv: missing });
+  }
+
+  try {
+    await ensureDatabaseInitialized();
+    await getPool().query('SELECT 1');
+    res.json({ ok: true, database: 'connected' });
+  } catch (err) {
+    console.error('GET /api/health error:', err);
+    res.status(503).json({ ok: false, error: 'Database connection failed' });
+  }
+});
+
+app.use('/api', async (req, res, next) => {
+  if (req.path === '/health') {
+    return next();
+  }
+
+  const missing = missingEnvVars();
+  if (missing.length > 0) {
+    return res.status(503).json({ error: 'Missing server configuration', missingEnv: missing });
+  }
+
+  try {
+    await ensureDatabaseInitialized();
+    next();
+  } catch (err) {
+    console.error('API initialization error:', err);
+    res.status(500).json({ error: 'Server initialization failed' });
+  }
+});
+
 app.get('/api/notes', async (_req, res) => {
   try {
     const result = await getPool().query(
@@ -171,12 +213,13 @@ app.put('/api/notes/:id', async (req, res) => {
     const encryptedContent = encrypt(rawContent || '');
     const now = Date.now();
 
-    const existing = await getPool().query('SELECT restricted, content, title FROM notes WHERE id = $1', [id]);
+    const existing = await getPool().query('SELECT restricted, content, title, locked_until FROM notes WHERE id = $1', [id]);
     const existingRow = existing.rows.length > 0 ? existing.rows[0] : null;
     const existingRestricted = existingRow ? existingRow.restricted : false;
+    const existingLocked = !!existingRow?.locked_until && Number(existingRow.locked_until) > Date.now();
     const finalRestricted = existingRestricted || (note.restricted || false);
-    const finalContent = existingRestricted ? existingRow.content : encryptedContent;
-    const finalTitle = existingRestricted ? existingRow.title : (note.title || 'New Note');
+    const finalContent = existingLocked ? existingRow.content : encryptedContent;
+    const finalTitle = existingLocked ? existingRow.title : (note.title || 'New Note');
 
     let lockedUntil = note.lockedUntil || null;
     const schedule = note.schedule || { enabled: false, days: [], slots: [] };

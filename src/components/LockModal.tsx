@@ -208,6 +208,7 @@ export function LockModal({ onLock, onCancel, currentSchedule }: LockModalProps)
                             type="button"
                             className={mode === 'duration' ? 'tab-active' : 'tab-inactive'}
                             onClick={() => setMode('duration')}
+                            data-testid="lock-mode-duration"
                         >
                             Duration
                         </button>
@@ -215,6 +216,7 @@ export function LockModal({ onLock, onCancel, currentSchedule }: LockModalProps)
                             type="button"
                             className={mode === 'datetime' ? 'tab-active' : 'tab-inactive'}
                             onClick={() => setMode('datetime')}
+                            data-testid="lock-mode-datetime"
                         >
                             Date & Time
                         </button>
@@ -222,6 +224,7 @@ export function LockModal({ onLock, onCancel, currentSchedule }: LockModalProps)
                             type="button"
                             className={mode === 'schedule' ? 'tab-active' : 'tab-inactive'}
                             onClick={() => setMode('schedule')}
+                            data-testid="lock-mode-schedule"
                         >
                             Schedule
                         </button>
@@ -229,6 +232,7 @@ export function LockModal({ onLock, onCancel, currentSchedule }: LockModalProps)
                             type="button"
                             className={mode === 'always' ? 'tab-active' : 'tab-inactive'}
                             onClick={() => setMode('always')}
+                            data-testid="lock-mode-always"
                         >
                             Always
                         </button>
@@ -240,11 +244,11 @@ export function LockModal({ onLock, onCancel, currentSchedule }: LockModalProps)
                             <div className="duration-inputs">
                                 <div style={{ flex: 1 }}>
                                     <label>Hours</label>
-                                    <input type="number" min="0" value={hours} onChange={(e) => setHours(e.target.value)} />
+                                    <input type="number" min="0" value={hours} onChange={(e) => setHours(e.target.value)} data-testid="lock-hours" />
                                 </div>
                                 <div style={{ flex: 1 }}>
                                     <label>Minutes</label>
-                                    <input type="number" min="0" max="59" value={minutes} onChange={(e) => setMinutes(e.target.value)} />
+                                    <input type="number" min="0" max="59" value={minutes} onChange={(e) => setMinutes(e.target.value)} data-testid="lock-minutes" />
                                 </div>
                             </div>
                         </>
@@ -260,6 +264,7 @@ export function LockModal({ onLock, onCancel, currentSchedule }: LockModalProps)
                                     value={scheduledDateTime}
                                     onChange={(e) => setScheduledDateTime(e.target.value)}
                                     style={{ width: '100%' }}
+                                    data-testid="lock-datetime"
                                 />
                             </div>
                         </>
@@ -283,6 +288,7 @@ export function LockModal({ onLock, onCancel, currentSchedule }: LockModalProps)
                                                 type="button"
                                                 className={`day-btn ${isActive ? 'day-btn-active' : ''} ${isSelected ? 'day-btn-selected' : ''}`}
                                                 onClick={() => handleDayClick(value)}
+                                                data-testid={`schedule-day-${value}`}
                                             >
                                                 {label}
                                                 {isActive && <span className="day-btn-dot" />}
@@ -319,6 +325,7 @@ export function LockModal({ onLock, onCancel, currentSchedule }: LockModalProps)
                                                     }
                                                 }}
                                                 className="slot-time-input"
+                                                data-testid={`schedule-slot-start-${selectedDay}-${idx}`}
                                             />
                                             <span className="slot-separator">&rarr;</span>
                                             <input
@@ -341,6 +348,7 @@ export function LockModal({ onLock, onCancel, currentSchedule }: LockModalProps)
                                                     }
                                                 }}
                                                 className="slot-time-input"
+                                                data-testid={`schedule-slot-end-${selectedDay}-${idx}`}
                                             />
                                             {currentSlots.length > 1 && (
                                                 <button
@@ -348,6 +356,7 @@ export function LockModal({ onLock, onCancel, currentSchedule }: LockModalProps)
                                                     className="btn-remove-slot"
                                                     onClick={() => removeSlot(idx)}
                                                     title="Remove slot"
+                                                    data-testid={`schedule-remove-slot-${selectedDay}-${idx}`}
                                                 >
                                                     ✕
                                                 </button>
@@ -355,7 +364,7 @@ export function LockModal({ onLock, onCancel, currentSchedule }: LockModalProps)
                                         </div>
                                     ))}
                                     {currentSlots.length < 5 && (
-                                        <button type="button" className="btn-add-slot" onClick={addSlot}>
+                                        <button type="button" className="btn-add-slot" onClick={addSlot} data-testid="schedule-add-slot">
                                             + Add Time Slot
                                         </button>
                                     )}
@@ -401,6 +410,7 @@ export function LockModal({ onLock, onCancel, currentSchedule }: LockModalProps)
                             }}
                             style={{ width: '100%', marginBottom: '6px' }}
                             placeholder="Enter number of characters"
+                            data-testid="emergency-length-input"
                         />
                         <div className="gibberish-bar">
                             <div
@@ -433,13 +443,14 @@ export function LockModal({ onLock, onCancel, currentSchedule }: LockModalProps)
                             type="button"
                             onClick={() => setHideTypos(!hideTypos)}
                             className={`toggle-btn ${hideTypos ? 'toggle-on-danger' : ''}`}
+                            data-testid="hide-typos-toggle"
                         >
                             {hideTypos ? 'ON' : 'OFF'}
                         </button>
                     </div>
 
                     <div className="fullpage-actions">
-                        <button type="submit" className="btn-extend" style={{ flex: 1 }}>
+                        <button type="submit" className="btn-extend" style={{ flex: 1 }} data-testid="apply-lock">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
                             {mode === 'schedule' ? 'Set Schedule' : mode === 'always' ? 'Lock Forever' : 'Apply Lock'}
                         </button>

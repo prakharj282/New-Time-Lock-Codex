@@ -34,27 +34,65 @@ export interface Note {
   restricted?: boolean;
 }
 
-async function api(path: string, options?: RequestInit) {
+export class ApiError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
+function getResponseError(data: unknown, status: number): string {
+  if (data && typeof data === 'object' && 'error' in data) {
+    const error = (data as { error?: unknown }).error;
+    if (typeof error === 'string' && error.trim()) {
+      return error;
+    }
+  }
+  return `API error: ${status}`;
+}
+
+async function api<T = unknown>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
     headers: { 'Content-Type': 'application/json' },
     ...options,
   });
-  if (!res.ok) throw new Error(`API error: ${res.status}`);
-  return res.json();
+
+  let data: unknown = null;
+  try {
+    data = await res.json();
+  } catch {
+    data = null;
+  }
+
+  if (!res.ok) {
+    throw new ApiError(getResponseError(data, res.status), res.status);
+  }
+
+  return data as T;
+}
+
+export function getErrorMessage(err: unknown, fallback = 'Something went wrong. Please try again.'): string {
+  if (err instanceof Error && err.message) {
+    return err.message;
+  }
+  return fallback;
 }
 
 export async function getNotes(): Promise<Note[]> {
-  return api('/notes');
+  return api<Note[]>('/notes');
 }
 
 export async function getNoteContent(id: string): Promise<string> {
-  const data = await api(`/notes/${id}/content`);
+  const data = await api<{ content?: string }>(`/notes/${id}/content`);
   return data.content || '';
 }
 
 export async function saveNote(note: Note, rawContent: string): Promise<{ success: boolean; note?: Note }> {
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const data = await api(`/notes/${note.id}`, {
+  const data = await api<{ success: boolean; note?: Note }>(`/notes/${note.id}`, {
     method: 'PUT',
     body: JSON.stringify({ note, rawContent, timezone }),
   });
@@ -62,7 +100,7 @@ export async function saveNote(note: Note, rawContent: string): Promise<{ succes
 }
 
 export async function updateTitle(id: string, title: string): Promise<{ success: boolean; note?: Note }> {
-  const data = await api(`/notes/${id}/title`, {
+  const data = await api<{ success: boolean; note?: Note }>(`/notes/${id}/title`, {
     method: 'PATCH',
     body: JSON.stringify({ title }),
   });
@@ -70,32 +108,32 @@ export async function updateTitle(id: string, title: string): Promise<{ success:
 }
 
 export async function deleteNote(id: string): Promise<boolean> {
-  const data = await api(`/notes/${id}`, { method: 'DELETE' });
+  const data = await api<{ success: boolean }>(`/notes/${id}`, { method: 'DELETE' });
   return data.success;
 }
 
 export async function extendLock(id: string, additionalMs: number): Promise<number | false> {
-  const data = await api(`/notes/${id}/extend-lock`, {
+  const data = await api<{ success: boolean; lockedUntil?: number }>(`/notes/${id}/extend-lock`, {
     method: 'POST',
     body: JSON.stringify({ additionalMs }),
   });
-  return data.success ? data.lockedUntil : false;
+  return data.success && typeof data.lockedUntil === 'number' ? data.lockedUntil : false;
 }
 
 export async function setEmergencyLength(id: string, newLength: number): Promise<number | false> {
-  const data = await api(`/notes/${id}/set-emergency-length`, {
+  const data = await api<{ success: boolean; emergencyLength?: number }>(`/notes/${id}/set-emergency-length`, {
     method: 'POST',
     body: JSON.stringify({ newLength }),
   });
-  return data.success ? data.emergencyLength : false;
+  return data.success && typeof data.emergencyLength === 'number' ? data.emergencyLength : false;
 }
 
 export async function setLockUntil(id: string, timestamp: number): Promise<number | false> {
-  const data = await api(`/notes/${id}/set-lock-until`, {
+  const data = await api<{ success: boolean; lockedUntil?: number }>(`/notes/${id}/set-lock-until`, {
     method: 'POST',
     body: JSON.stringify({ timestamp }),
   });
-  return data.success ? data.lockedUntil : false;
+  return data.success && typeof data.lockedUntil === 'number' ? data.lockedUntil : false;
 }
 
 let _cachedLastKnownTime: number = 0;
@@ -113,7 +151,7 @@ export function getLastKnownTime(): number {
 
 export async function fetchLastKnownTime(): Promise<number> {
   try {
-    const data = await api('/time/last-known');
+    const data = await api<{ time?: number }>('/time/last-known');
     _cachedLastKnownTime = data.time || 0;
     return _cachedLastKnownTime;
   } catch {
@@ -122,7 +160,7 @@ export async function fetchLastKnownTime(): Promise<number> {
 }
 
 export async function emergencyUnlock(id: string): Promise<{ success: boolean; note?: Note; error?: string }> {
-  return api(`/notes/${id}/emergency-unlock`, { method: 'POST' });
+  return api<{ success: boolean; note?: Note; error?: string }>(`/notes/${id}/emergency-unlock`, { method: 'POST' });
 }
 
 export async function useEmergencyOpen(id: string): Promise<{
@@ -132,7 +170,13 @@ export async function useEmergencyOpen(id: string): Promise<{
   limit?: number;
   note?: Note;
 }> {
-  return api(`/notes/${id}/emergency-open`, { method: 'POST' });
+  return api<{
+    success: boolean;
+    error?: string;
+    usedThisWeek?: number;
+    limit?: number;
+    note?: Note;
+  }>(`/notes/${id}/emergency-open`, { method: 'POST' });
 }
 
 export function getSlotsForDay(schedule: NoteSchedule, day: number): ScheduleSlot[] {
@@ -309,7 +353,7 @@ export function getNextUpcomingSlot(schedule: NoteSchedule): NextSlotInfo | null
 
 export async function applySchedules(): Promise<{ updated: boolean; notes: Note[] }> {
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  return api('/notes/apply-schedules', {
+  return api<{ updated: boolean; notes: Note[] }>('/notes/apply-schedules', {
     method: 'POST',
     body: JSON.stringify({ timezone }),
   });

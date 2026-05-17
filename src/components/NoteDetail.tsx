@@ -21,7 +21,9 @@ function getImageData(content: string): string | null {
     try {
         const parsed = JSON.parse(content);
         if (parsed && parsed.type === 'image') return parsed.data;
-    } catch {}
+    } catch {
+        return null;
+    }
     return null;
 }
 
@@ -48,6 +50,9 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
     const [content, setContent] = useState('');
     const [isLoading, setIsLoading] = useState(true);
     const [currentView, setCurrentView] = useState<ViewType>('detail');
+    const [error, setError] = useState('');
+    const [isSaving, setIsSaving] = useState(false);
+    const [isDeleting, setIsDeleting] = useState(false);
 
     const [localNote, setLocalNote] = useState<AppNote>(note);
 
@@ -65,12 +70,16 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
     useEffect(() => {
         const checkSchedule = async () => {
             if (localNote.schedule?.enabled && (!localNote.lockedUntil || localNote.lockedUntil <= Date.now())) {
-                const result = await store.applySchedules();
-                if (result.updated) {
-                    const updated = result.notes.find(n => n.id === localNote.id);
-                    if (updated && updated.lockedUntil && updated.lockedUntil > Date.now()) {
-                        setLocalNote(prev => ({ ...prev, lockedUntil: updated.lockedUntil }));
+                try {
+                    const result = await store.applySchedules();
+                    if (result.updated) {
+                        const updated = result.notes.find(n => n.id === localNote.id);
+                        if (updated && updated.lockedUntil && updated.lockedUntil > Date.now()) {
+                            setLocalNote(prev => ({ ...prev, lockedUntil: updated.lockedUntil }));
+                        }
                     }
+                } catch (err) {
+                    setError(store.getErrorMessage(err, 'Could not apply schedule lock.'));
                 }
             }
         };
@@ -186,11 +195,13 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                 const decryptedContent = await store.getNoteContent(localNote.id);
                 if (!cancelled) {
                     setContent(decryptedContent);
+                    setError('');
                 }
             } catch (err) {
                 console.error('Failed to load note content:', err);
                 if (!cancelled) {
                     setContent('');
+                    setError(store.getErrorMessage(err, 'Failed to load note content.'));
                 }
             } finally {
                 if (!cancelled) {
@@ -206,13 +217,21 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
     }, [localNote.id, isUnsaved, note.content]);
 
     const handleSaveTitle = async () => {
-        const result = await store.updateTitle(localNote.id, title);
-        if (result.success) {
-            setLocalNote(prev => ({ ...prev, title }));
+        setIsSaving(true);
+        setError('');
+        try {
+            const result = await store.updateTitle(localNote.id, title);
+            if (result.success) {
+                setLocalNote(prev => ({ ...prev, title }));
+            }
+        } catch (err) {
+            setError(store.getErrorMessage(err, 'Failed to save title.'));
+        } finally {
+            setIsSaving(false);
         }
     };
 
-    const handleSave = async (overrides?: Partial<AppNote>) => {
+    const handleSave = async (overrides?: Partial<AppNote>): Promise<boolean> => {
         const eoFields = isNewNote ? {
             emergencyOpenEnabled: eoEnabled,
             emergencyOpenPerWeek: eoEnabled ? eoPerWeek : 0,
@@ -220,23 +239,42 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
         } : {};
         const restrictedField = isNewNote ? { restricted: true } : {};
         const updatedNote = { ...localNote, title, ...eoFields, ...restrictedField, ...overrides };
-        const result = await store.saveNote(updatedNote as AppNote, content);
-        if (result.note) {
-            setLocalNote(result.note);
-        } else {
-            setLocalNote(updatedNote as AppNote);
+        setIsSaving(true);
+        setError('');
+        try {
+            const result = await store.saveNote(updatedNote as AppNote, content);
+            if (result.note) {
+                setLocalNote(result.note);
+            } else {
+                setLocalNote(updatedNote as AppNote);
+            }
+            onBack();
+            return true;
+        } catch (err) {
+            setError(store.getErrorMessage(err, 'Failed to save note.'));
+            return false;
+        } finally {
+            setIsSaving(false);
         }
-        onBack();
     };
 
     const [deleteConfirmText, setDeleteConfirmText] = useState('');
 
     const handleDelete = async () => {
-        await store.deleteNote(localNote.id);
-        onBack();
+        setIsDeleting(true);
+        setError('');
+        try {
+            await store.deleteNote(localNote.id);
+            onBack();
+        } catch (err) {
+            setError(store.getErrorMessage(err, 'Failed to delete note.'));
+            setCurrentView('detail');
+        } finally {
+            setIsDeleting(false);
+        }
     };
 
-    const executeLock = (result: {
+    const executeLock = async (result: {
         lockedUntil?: number;
         emergencyLength: number;
         hideTypos: boolean;
@@ -256,34 +294,44 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
             overrides.lockedUntil = result.lockedUntil!;
             overrides.schedule = { enabled: false, days: [], slots: [] };
         }
-        handleSave(overrides);
+        await handleSave(overrides);
     };
 
     const executeEmergencyUnlock = async () => {
         setCurrentView('detail');
-        const result = await store.emergencyUnlock(localNote.id);
-        if (result.success && result.note) {
-            setLocalNote(result.note);
-            onBack();
-        } else {
-            alert(result.error || 'Failed to unlock note. Please try again.');
+        setError('');
+        try {
+            const result = await store.emergencyUnlock(localNote.id);
+            if (result.success && result.note) {
+                setLocalNote(result.note);
+                onBack();
+            } else {
+                setError(result.error || 'Failed to unlock note. Please try again.');
+            }
+        } catch (err) {
+            setError(store.getErrorMessage(err, 'Failed to unlock note.'));
         }
     };
 
     const executeEmergencyOpen = async () => {
         if (!confirm('Use 1 Emergency Open to instantly unlock this note?')) return;
-        const result = await store.useEmergencyOpen(localNote.id);
-        if (result.success) {
-            if (result.note) {
-                setLocalNote(result.note);
+        setError('');
+        try {
+            const result = await store.useEmergencyOpen(localNote.id);
+            if (result.success) {
+                if (result.note) {
+                    setLocalNote(result.note);
+                } else {
+                    setLocalNote({ ...localNote, lockedUntil: null, emergencyOpenLog: [...eoLog, Date.now()] });
+                }
+                onBack();
+            } else if (result.error === 'quota_exhausted') {
+                setError(`Quota exhausted! You've used all ${result.limit} Emergency Opens this week.`);
             } else {
-                setLocalNote({ ...localNote, lockedUntil: null, emergencyOpenLog: [...eoLog, Date.now()] });
+                setError('Emergency Open failed: ' + result.error);
             }
-            onBack();
-        } else if (result.error === 'quota_exhausted') {
-            alert(`Quota exhausted! You've used all ${result.limit} Emergency Opens this week.`);
-        } else {
-            alert('Emergency Open failed: ' + result.error);
+        } catch (err) {
+            setError(store.getErrorMessage(err, 'Emergency Open failed.'));
         }
     };
 
@@ -295,14 +343,24 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                 alert('Please enter a valid extension time.');
                 return;
             }
-            newLockedUntil = await store.extendLock(localNote.id, addMs);
+            try {
+                newLockedUntil = await store.extendLock(localNote.id, addMs);
+            } catch (err) {
+                setError(store.getErrorMessage(err, 'Failed to extend lock.'));
+                return;
+            }
         } else {
             const targetTs = new Date(extendDateTime).getTime();
             if (targetTs <= Date.now()) {
                 alert('Please select a date and time in the future.');
                 return;
             }
-            newLockedUntil = await store.setLockUntil(localNote.id, targetTs);
+            try {
+                newLockedUntil = await store.setLockUntil(localNote.id, targetTs);
+            } catch (err) {
+                setError(store.getErrorMessage(err, 'Failed to set lock.'));
+                return;
+            }
         }
         if (newLockedUntil) {
             setLocalNote({ ...localNote, lockedUntil: newLockedUntil });
@@ -318,11 +376,15 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
             alert('New length must be greater than the current length.');
             return;
         }
-        const result = await store.setEmergencyLength(localNote.id, newGibberishLength);
-        if (result) {
-            setLocalNote({ ...localNote, emergencyLength: result });
+        try {
+            const result = await store.setEmergencyLength(localNote.id, newGibberishLength);
+            if (result) {
+                setLocalNote({ ...localNote, emergencyLength: result });
+            }
+            setCurrentView('detail');
+        } catch (err) {
+            setError(store.getErrorMessage(err, 'Failed to extend gibberish length.'));
         }
-        setCurrentView('detail');
     };
 
 
@@ -369,6 +431,7 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                             type="button"
                             className={extendMode === 'duration' ? 'tab-active' : 'tab-inactive'}
                             onClick={() => setExtendMode('duration')}
+                            data-testid="extend-mode-duration"
                         >
                             Add Duration
                         </button>
@@ -376,6 +439,7 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                             type="button"
                             className={extendMode === 'datetime' ? 'tab-active' : 'tab-inactive'}
                             onClick={() => { setExtendMode('datetime'); setExtendDateTime(getDefaultExtendDateTime()); }}
+                            data-testid="extend-mode-datetime"
                         >
                             Set Date & Time
                         </button>
@@ -387,11 +451,11 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                             <div className="duration-inputs">
                                 <div style={{ flex: 1 }}>
                                     <label>Hours</label>
-                                    <input type="number" min="0" value={extendHours} onChange={(e) => setExtendHours(e.target.value)} />
+                                    <input type="number" min="0" value={extendHours} onChange={(e) => setExtendHours(e.target.value)} data-testid="extend-hours" />
                                 </div>
                                 <div style={{ flex: 1 }}>
                                     <label>Minutes</label>
-                                    <input type="number" min="0" max="59" value={extendMinutes} onChange={(e) => setExtendMinutes(e.target.value)} />
+                                    <input type="number" min="0" max="59" value={extendMinutes} onChange={(e) => setExtendMinutes(e.target.value)} data-testid="extend-minutes" />
                                 </div>
                             </div>
                         </>
@@ -404,13 +468,14 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                                     value={extendDateTime}
                                     onChange={(e) => setExtendDateTime(e.target.value)}
                                     style={{ width: '100%' }}
+                                    data-testid="extend-datetime"
                                 />
                             </div>
                         </>
                     )}
 
                     <div className="fullpage-actions">
-                        <button type="button" onClick={executeExtendLock} className="btn-extend" style={{ flex: 1 }}>
+                        <button type="button" onClick={executeExtendLock} className="btn-extend" style={{ flex: 1 }} data-testid="extend-lock-submit">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
                             Extend
                         </button>
@@ -507,6 +572,7 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                         onChange={(e) => setDeleteConfirmText(e.target.value)}
                         onPaste={(e) => e.preventDefault()}
                         placeholder='Type "delete" to confirm'
+                        data-testid="delete-confirm-input"
                         autoComplete="off"
                         autoCorrect="off"
                         autoCapitalize="off"
@@ -518,11 +584,12 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                             type="button"
                             onClick={handleDelete}
                             className="danger"
-                            disabled={!isDeleteConfirmed}
+                            disabled={!isDeleteConfirmed || isDeleting}
+                            data-testid="delete-confirm"
                             style={{ flex: 1 }}
                         >
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                            Confirm Delete
+                            {isDeleting ? 'Deleting...' : 'Confirm Delete'}
                         </button>
                     </div>
                 </div>
@@ -538,7 +605,7 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                     Back
                 </button>
                 <div style={{ flex: 1 }} />
-                <button className="danger" onClick={() => { setDeleteConfirmText(''); setCurrentView('confirmDelete'); }}>
+                <button className="danger" onClick={() => { setError(''); setDeleteConfirmText(''); setCurrentView('confirmDelete'); }} data-testid="delete-note">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                     Delete
                 </button>
@@ -548,6 +615,7 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                             <button
                                 onClick={() => setCurrentView('extendLock')}
                                 className="btn-extend"
+                                data-testid="extend-lock-open"
                             >
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                                 Extend
@@ -556,6 +624,7 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                         <button
                             onClick={() => { setNewGibberishLength(currentGibberishLength); setCurrentView('extendGibberish'); }}
                             className="btn-extend"
+                            data-testid="extend-gibberish-open"
                         >
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
                             Gibberish
@@ -564,36 +633,36 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                             <button
                                 onClick={executeEmergencyOpen}
                                 className="btn-emergency-open"
+                                data-testid="emergency-open"
                             >
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
                                 Emergency
                             </button>
                         )}
-                        <button className="danger" onClick={() => setCurrentView('emergencyUnlock')}>
+                        <button className="danger" onClick={() => { setError(''); setCurrentView('emergencyUnlock'); }} data-testid="emergency-unlock-open">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
                             Unlock
                         </button>
                     </>
-                ) : localNote.restricted ? (
-                    <>
-                        <button onClick={() => setCurrentView('lock')}>
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-                            Lock
-                        </button>
-                    </>
                 ) : (
                     <>
-                        <button onClick={() => setCurrentView('lock')}>
+                        <button onClick={() => { setError(''); setCurrentView('lock'); }} data-testid="lock-note">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
                             Lock
                         </button>
-                        <button onClick={() => handleSave()} className="btn-save">
+                        <button onClick={() => handleSave()} className="btn-save" disabled={isSaving} data-testid="save-note">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-                            Save
+                            {isSaving ? 'Saving...' : 'Save'}
                         </button>
                     </>
                 )}
             </div>
+
+            {error && (
+                <div className="error-banner" data-testid="note-error" role="alert">
+                    {error}
+                </div>
+            )}
 
             <div className="note-title-row">
                 <input
@@ -601,13 +670,16 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                     onChange={(e) => setTitle(e.target.value)}
                     placeholder="Note Title"
                     className="note-title-input"
+                    data-testid="note-title-input"
                 />
                 {isLocked && title !== localNote.title && (
                     <button
                         className="btn-save-title"
                         onClick={handleSaveTitle}
+                        disabled={isSaving}
+                        data-testid="save-title"
                     >
-                        Save Title
+                        {isSaving ? 'Saving...' : 'Save Title'}
                     </button>
                 )}
             </div>
@@ -707,7 +779,7 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                         );
                     })()}
                 </div>
-            ) : localNote.restricted ? (
+            ) : localNote.restricted && isLocked ? (
                 <>
                     {isImageContent(content) ? (
                         <div className="photo-note-display">
@@ -808,11 +880,12 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                         capture="environment"
                         onChange={handlePhotoCapture}
                         style={{ display: 'none' }}
+                        data-testid="photo-input"
                     />
 
                     {isImageContent(content) ? (
                         <div className="photo-note-display">
-                            <img src={getImageData(content)!} alt="Photo note" className="photo-note-image" />
+                            <img src={getImageData(content)!} alt="Photo note" className="photo-note-image" data-testid="photo-note-image" />
                             {isNewNote && (
                                 <button
                                     type="button"
@@ -823,6 +896,7 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                                             fileInputRef.current.click();
                                         }
                                     }}
+                                    data-testid="photo-retake"
                                 >
                                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
                                     Retake Photo
@@ -836,6 +910,7 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                                     type="button"
                                     className="btn-camera-capture"
                                     onClick={() => fileInputRef.current?.click()}
+                                    data-testid="photo-capture"
                                 >
                                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
                                     Take Photo
@@ -847,6 +922,7 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                                 placeholder="Write your note here..."
                                 rows={6}
                                 disabled={isLocked}
+                                data-testid="note-content-input"
                             />
                         </>
                     )}
@@ -951,6 +1027,7 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                                     type="button"
                                     onClick={() => setEoEnabled(!eoEnabled)}
                                     className={`toggle-btn ${eoEnabled ? 'toggle-on-purple' : ''}`}
+                                    data-testid="emergency-open-toggle"
                                 >
                                     {eoEnabled ? 'ON' : 'OFF'}
                                 </button>
@@ -962,6 +1039,7 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                                         value={eoPerWeek}
                                         onChange={(e) => setEoPerWeek(parseInt(e.target.value))}
                                         className="select-input"
+                                        data-testid="emergency-open-per-week"
                                     >
                                         {[1, 2, 3, 4, 5].map(n => (
                                             <option key={n} value={n}>{n}</option>

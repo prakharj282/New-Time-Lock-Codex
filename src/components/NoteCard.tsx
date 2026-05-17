@@ -111,6 +111,9 @@ export function NoteCard({ note, onClick, index }: NoteCardProps) {
         <div
             className="card note-card note-card-detailed"
             onClick={onClick}
+            data-testid="note-card"
+            data-note-id={note.id}
+            data-note-title={note.title}
             style={{ animationDelay: `${index * 60}ms`, animation: `fadeInUp 0.4s ease ${index * 60}ms both` }}
         >
             <div className={`note-card-accent ${accentClass}`} />
@@ -120,7 +123,7 @@ export function NoteCard({ note, onClick, index }: NoteCardProps) {
                 </div>
             )}
             <div className="note-card-body">
-                <div className="note-card-header">{note.title}</div>
+                <div className="note-card-header" data-testid="note-card-title">{note.title}</div>
                 <div className="note-card-info">
                     <div className="note-card-info-row">
                         {isLocked

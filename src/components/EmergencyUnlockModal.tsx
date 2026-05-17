@@ -91,6 +91,7 @@ export function EmergencyUnlockModal({ requiredLength, hideTypos, onSuccess, onC
                 <div
                     className="emergency-target-text"
                     onCopy={preventCopyPaste}
+                    data-testid="emergency-target"
                 >
                     {renderTargetText()}
                 </div>
@@ -117,6 +118,7 @@ export function EmergencyUnlockModal({ requiredLength, hideTypos, onSuccess, onC
                     placeholder="Start typing..."
                     rows={4}
                     className="emergency-textarea"
+                    data-testid="emergency-input"
                     spellCheck={false}
                     autoComplete="off"
                     autoCorrect="off"
@@ -129,6 +131,7 @@ export function EmergencyUnlockModal({ requiredLength, hideTypos, onSuccess, onC
                         onClick={onSuccess}
                         disabled={!isMatched}
                         className={isMatched ? 'danger' : ''}
+                        data-testid="emergency-unlock-submit"
                         style={{
                             background: isMatched ? 'linear-gradient(135deg, #ef4444, #dc2626)' : 'var(--bg-tertiary)',
                             opacity: isMatched ? 1 : 0.5,

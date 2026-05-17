@@ -12,11 +12,17 @@ function App() {
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
   const [unsavedNoteIds, setUnsavedNoteIds] = useState<Set<string>>(new Set());
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [appError, setAppError] = useState('');
   const lastTapRef = useRef<number>(0);
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadNotes = useCallback(async () => {
-    const loadedNotes = await store.getNotes();
-    setNotes(loadedNotes);
+    try {
+      const loadedNotes = await store.getNotes();
+      setNotes(loadedNotes);
+      setAppError('');
+    } catch (err) {
+      setAppError(store.getErrorMessage(err, 'Could not load notes. Check your API and database settings.'));
+    }
   }, []);
 
   useEffect(() => {
@@ -29,17 +35,25 @@ function App() {
 
     // Schedule enforcement — check every 30s
     const scheduleInterval = setInterval(async () => {
-      const result = await store.applySchedules();
-      if (result.updated) {
-        setNotes(result.notes);
+      try {
+        const result = await store.applySchedules();
+        if (result.updated) {
+          setNotes(result.notes);
+        }
+      } catch (err) {
+        setAppError(store.getErrorMessage(err, 'Could not apply schedules.'));
       }
     }, 30_000);
 
     // Also check schedules immediately
     const immediateSchedule = setTimeout(async () => {
-      const result = await store.applySchedules();
-      if (result.updated) {
-        setNotes(result.notes);
+      try {
+        const result = await store.applySchedules();
+        if (result.updated) {
+          setNotes(result.notes);
+        }
+      } catch (err) {
+        setAppError(store.getErrorMessage(err, 'Could not apply schedules.'));
       }
     }, 1000);
 
@@ -48,15 +62,19 @@ function App() {
       clearInterval(scheduleInterval);
       clearTimeout(immediateSchedule);
     };
-  }, []);
+  }, [loadNotes]);
 
   // Re-run schedule checks when notes change
   useEffect(() => {
     if (notes.length === 0) return;
     (async () => {
-      const result = await store.applySchedules();
-      if (result.updated) {
-        setNotes(result.notes);
+      try {
+        const result = await store.applySchedules();
+        if (result.updated) {
+          setNotes(result.notes);
+        }
+      } catch (err) {
+        setAppError(store.getErrorMessage(err, 'Could not apply schedules.'));
       }
     })();
   }, [notes.length]);
@@ -78,6 +96,8 @@ function App() {
       if (result.updated) {
         setNotes(result.notes);
       }
+    } catch (err) {
+      setAppError(store.getErrorMessage(err, 'Refresh failed.'));
     } finally {
       setIsRefreshing(false);
     }
@@ -97,6 +117,7 @@ function App() {
   };
 
   const handleCreateNote = () => {
+    setAppError('');
     const now = Date.now();
     const newNote: AppNote = {
       id: crypto.randomUUID(),
@@ -145,11 +166,17 @@ function App() {
                 <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
               </svg>
             </button>
-            <button onClick={handleCreateNote} id="create-note-btn">
+            <button onClick={handleCreateNote} id="create-note-btn" data-testid="create-note">
               + New Note
             </button>
           </div>
         </header>
+      )}
+
+      {appError && (
+        <div className="error-banner" data-testid="app-error" role="alert">
+          {appError}
+        </div>
       )}
 
       <main>
