@@ -1,0 +1,16 @@
+{
+    "compilerOptions": {
+        "target": "ES2022",
+        "module": "CommonJS",
+        "rootDir": "./electron",
+        "outDir": "./dist-electron",
+        "esModuleInterop": true,
+        "forceConsistentCasingInFileNames": true,
+        "strict": false,
+        "skipLibCheck": true,
+        "moduleResolution": "node"
+    },
+    "include": [
+        "electron/**/*"
+    ]
+}

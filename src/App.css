@@ -1,0 +1,77 @@
+#root {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 2rem;
+  text-align: center;
+}
+
+.logo {
+  height: 6em;
+  padding: 1.5em;
+  will-change: filter;
+  transition: filter 300ms;
+}
+.logo:hover {
+  filter: drop-shadow(0 0 2em #646cffaa);
+}
+.logo.react:hover {
+  filter: drop-shadow(0 0 2em #61dafbaa);
+}
+
+@keyframes logo-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  a:nth-of-type(2) .logo {
+    animation: logo-spin infinite 20s linear;
+  }
+}
+
+.card {
+  padding: 2em;
+}
+
+.read-the-docs {
+  color: #888;
+}
+
+.note-card-detailed {
+  text-align: left;
+}
+
+.note-card-detailed .note-card-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.note-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.note-title-row .note-title-input {
+  flex: 1;
+}
+
+.btn-save-title {
+  white-space: nowrap;
+  padding: 6px 12px;
+  font-size: 13px;
+  border-radius: 6px;
+  background: var(--accent-color, #646cff);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+}
+
+.btn-save-title:hover {
+  opacity: 0.85;
+}
