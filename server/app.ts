@@ -24,7 +24,24 @@ let pool: Pool | null = null;
 
 function getPool(): Pool {
   if (!pool) {
-    pool = new Pool({ connectionString: requireEnv('DATABASE_URL') });
+    const connectionString = requireEnv('DATABASE_URL');
+    let poolConnectionString = connectionString;
+    const needsSsl = /sslmode=require|supabase\.com|pooler\.supabase\.com/i.test(connectionString);
+
+    if (needsSsl) {
+      try {
+        const parsed = new URL(connectionString);
+        parsed.searchParams.delete('sslmode');
+        poolConnectionString = parsed.toString();
+      } catch {
+        poolConnectionString = connectionString.replace(/([?&])sslmode=[^&]+&?/i, '$1');
+      }
+    }
+
+    pool = new Pool({
+      connectionString: poolConnectionString,
+      ssl: needsSsl ? { rejectUnauthorized: false } : undefined,
+    });
   }
   return pool;
 }
@@ -80,9 +97,22 @@ interface DbNote {
   emergency_open_enabled: boolean;
   emergency_open_per_week: number;
   emergency_open_log: number[];
-  schedule: any;
+  schedule: NoteSchedule | null;
   deleted_at: string | null;
   restricted: boolean;
+}
+
+interface ScheduleSlot {
+  start: string;
+  end: string;
+}
+
+interface NoteSchedule {
+  enabled: boolean;
+  days?: number[];
+  slots?: ScheduleSlot[];
+  perDay?: Record<number, ScheduleSlot[]>;
+  timezone?: string;
 }
 
 function dbToNote(row: DbNote) {
@@ -105,6 +135,20 @@ function dbToNote(row: DbNote) {
 }
 
 async function initDatabase() {
+  const schemaResult = await getPool().query('SELECT current_schema() AS schema');
+  const activeSchema = schemaResult.rows[0]?.schema || 'public';
+  const existingIdColumn = await getPool().query(`
+    SELECT data_type
+    FROM information_schema.columns
+    WHERE table_schema = $1 AND table_name = 'notes' AND column_name = 'id'
+  `, [activeSchema]);
+
+  if (existingIdColumn.rows.length > 0 && existingIdColumn.rows[0].data_type !== 'text') {
+    const backupName = `notes_supabase_sample_backup_${Date.now()}`;
+    await getPool().query(`ALTER TABLE notes RENAME TO "${backupName}"`);
+    console.warn(`Existing incompatible notes table was renamed to ${backupName}`);
+  }
+
   await getPool().query(`
     CREATE TABLE IF NOT EXISTS notes (
       id TEXT PRIMARY KEY,
@@ -123,6 +167,18 @@ async function initDatabase() {
       restricted BOOLEAN NOT NULL DEFAULT FALSE
     );
   `);
+  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT 'New Note'`).catch(() => {});
+  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS content TEXT NOT NULL DEFAULT ''`).catch(() => {});
+  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT`).catch(() => {});
+  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT`).catch(() => {});
+  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS locked_until BIGINT`).catch(() => {});
+  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS emergency_length INTEGER`).catch(() => {});
+  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS hide_typos BOOLEAN NOT NULL DEFAULT FALSE`).catch(() => {});
+  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS emergency_open_enabled BOOLEAN NOT NULL DEFAULT FALSE`).catch(() => {});
+  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS emergency_open_per_week INTEGER NOT NULL DEFAULT 0`).catch(() => {});
+  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS emergency_open_log JSONB NOT NULL DEFAULT '[]'::JSONB`).catch(() => {});
+  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS schedule JSONB NOT NULL DEFAULT '{"enabled": false, "days": [], "slots": []}'::JSONB`).catch(() => {});
+  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS deleted_at BIGINT`).catch(() => {});
   await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS restricted BOOLEAN NOT NULL DEFAULT FALSE`).catch(() => {});
   await getPool().query(`ALTER TABLE notes DROP COLUMN IF EXISTS schedule_override_until`).catch(() => {});
   await getPool().query(`
@@ -493,7 +549,7 @@ function getTimeInTimezone(timezone: string): { day: number; hours: number; minu
   }
 }
 
-function getSlotsForDay(schedule: any, day: number): any[] {
+function getSlotsForDay(schedule: NoteSchedule, day: number): ScheduleSlot[] {
   if (schedule.perDay && schedule.perDay[day]) {
     return schedule.perDay[day];
   }
@@ -503,7 +559,7 @@ function getSlotsForDay(schedule: any, day: number): any[] {
   return [];
 }
 
-function isWithinSchedule(schedule: any, timezone?: string): boolean {
+function isWithinSchedule(schedule: NoteSchedule, timezone?: string): boolean {
   if (!schedule || !schedule.enabled) return false;
 
   const tz = timezone || schedule.timezone;
@@ -532,7 +588,7 @@ function isWithinSchedule(schedule: any, timezone?: string): boolean {
   return false;
 }
 
-function getActiveSlotEnd(schedule: any, timezone?: string): Date | null {
+function getActiveSlotEnd(schedule: NoteSchedule, timezone?: string): Date | null {
   if (!schedule || !schedule.enabled) return null;
 
   const tz = timezone || schedule.timezone;

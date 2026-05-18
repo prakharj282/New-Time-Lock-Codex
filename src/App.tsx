@@ -15,15 +15,36 @@ function App() {
   const [appError, setAppError] = useState('');
   const lastTapRef = useRef<number>(0);
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const unsavedNoteIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    unsavedNoteIdsRef.current = unsavedNoteIds;
+  }, [unsavedNoteIds]);
+
+  const mergeServerNotes = useCallback((serverNotes: AppNote[]) => {
+    setNotes(prev => {
+      const unsavedNotes = prev.filter(note => unsavedNoteIdsRef.current.has(note.id));
+      if (unsavedNotes.length === 0) {
+        return serverNotes;
+      }
+
+      const serverNoteIds = new Set(serverNotes.map(note => note.id));
+      return [
+        ...serverNotes,
+        ...unsavedNotes.filter(note => !serverNoteIds.has(note.id)),
+      ];
+    });
+  }, []);
+
   const loadNotes = useCallback(async () => {
     try {
       const loadedNotes = await store.getNotes();
-      setNotes(loadedNotes);
+      mergeServerNotes(loadedNotes);
       setAppError('');
     } catch (err) {
       setAppError(store.getErrorMessage(err, 'Could not load notes. Check your API and database settings.'));
     }
-  }, []);
+  }, [mergeServerNotes]);
 
   useEffect(() => {
     loadNotes();
@@ -38,7 +59,7 @@ function App() {
       try {
         const result = await store.applySchedules();
         if (result.updated) {
-          setNotes(result.notes);
+          mergeServerNotes(result.notes);
         }
       } catch (err) {
         setAppError(store.getErrorMessage(err, 'Could not apply schedules.'));
@@ -50,7 +71,7 @@ function App() {
       try {
         const result = await store.applySchedules();
         if (result.updated) {
-          setNotes(result.notes);
+          mergeServerNotes(result.notes);
         }
       } catch (err) {
         setAppError(store.getErrorMessage(err, 'Could not apply schedules.'));
@@ -62,7 +83,7 @@ function App() {
       clearInterval(scheduleInterval);
       clearTimeout(immediateSchedule);
     };
-  }, [loadNotes]);
+  }, [loadNotes, mergeServerNotes]);
 
   // Re-run schedule checks when notes change
   useEffect(() => {
@@ -71,13 +92,13 @@ function App() {
       try {
         const result = await store.applySchedules();
         if (result.updated) {
-          setNotes(result.notes);
+          mergeServerNotes(result.notes);
         }
       } catch (err) {
         setAppError(store.getErrorMessage(err, 'Could not apply schedules.'));
       }
     })();
-  }, [notes.length]);
+  }, [notes.length, mergeServerNotes]);
 
   const handleRefresh = async () => {
     const now = Date.now();
@@ -94,7 +115,7 @@ function App() {
       await loadNotes();
       const result = await store.applySchedules();
       if (result.updated) {
-        setNotes(result.notes);
+        mergeServerNotes(result.notes);
       }
     } catch (err) {
       setAppError(store.getErrorMessage(err, 'Refresh failed.'));

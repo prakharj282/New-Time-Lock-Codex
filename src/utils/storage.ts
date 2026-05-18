@@ -44,12 +44,21 @@ export class ApiError extends Error {
   }
 }
 
-function getResponseError(data: unknown, status: number): string {
+export function getResponseError(data: unknown, status: number): string {
+  if (data && typeof data === 'object' && 'missingEnv' in data) {
+    const missingEnv = (data as { missingEnv?: unknown }).missingEnv;
+    if (Array.isArray(missingEnv) && missingEnv.every(item => typeof item === 'string')) {
+      return `Missing server configuration: ${missingEnv.join(', ')}`;
+    }
+  }
   if (data && typeof data === 'object' && 'error' in data) {
     const error = (data as { error?: unknown }).error;
     if (typeof error === 'string' && error.trim()) {
       return error;
     }
+  }
+  if (status === 404) {
+    return 'API route not found (404). Make sure you are running the full app server and Vercel routes /api/* to the Express function.';
   }
   return `API error: ${status}`;
 }

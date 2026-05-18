@@ -27,14 +27,20 @@ export function formatUnlockTime(timestamp: number): string {
  * Returns epoch milliseconds, or null if all sources fail.
  */
 export async function fetchNetworkTime(): Promise<number | null> {
-    const sources: { url: string; parse: (data: any) => number }[] = [
+    const sources: { url: string; parse: (data: unknown) => number }[] = [
         {
             url: 'https://worldtimeapi.org/api/timezone/Etc/UTC',
-            parse: (data) => data.unixtime * 1000,
+            parse: (data) => {
+                const payload = data as { unixtime?: number };
+                return typeof payload.unixtime === 'number' ? payload.unixtime * 1000 : 0;
+            },
         },
         {
             url: 'https://timeapi.io/api/time/current/zone?timeZone=UTC',
-            parse: (data) => new Date(data.dateTime + 'Z').getTime(),
+            parse: (data) => {
+                const payload = data as { dateTime?: string };
+                return typeof payload.dateTime === 'string' ? new Date(`${payload.dateTime}Z`).getTime() : 0;
+            },
         },
     ];
 

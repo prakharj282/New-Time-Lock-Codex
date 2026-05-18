@@ -24,6 +24,14 @@ export function NoteCard({ note, onClick, index }: NoteCardProps) {
     const [timeLeft, setTimeLeft] = useState<string>('');
     const [scheduleCountdown, setScheduleCountdown] = useState<string>('');
     const [thumbnailSrc, setThumbnailSrc] = useState<string | null>(null);
+    const [nowMs, setNowMs] = useState<number | null>(null);
+
+    useEffect(() => {
+        const updateNow = () => setNowMs(Date.now());
+        updateNow();
+        const interval = setInterval(updateNow, 1000);
+        return () => clearInterval(interval);
+    }, []);
 
     useEffect(() => {
         let stale = false;
@@ -50,7 +58,7 @@ export function NoteCard({ note, onClick, index }: NoteCardProps) {
         return () => { stale = true; };
     }, [note.id, note.lockedUntil]);
 
-    const isLocked = note.lockedUntil && note.lockedUntil > Date.now();
+    const isLocked = !!note.lockedUntil && (nowMs === null || note.lockedUntil > nowMs);
     const alwaysLocked = isAlwaysLocked(note);
     const hasSchedule = note.schedule?.enabled;
     const isScheduleActive = hasSchedule && isWithinSchedule(note.schedule!);

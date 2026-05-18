@@ -2,6 +2,8 @@ import { defineConfig } from '@playwright/test';
 import 'dotenv/config';
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
+const testBaseUrl = process.env.TEST_BASE_URL;
+const isRemote = !!testBaseUrl;
 
 if (!testDatabaseUrl) {
   throw new Error(
@@ -21,13 +23,13 @@ export default defineConfig({
   workers: 1,
   reporter: [['list']],
   use: {
-    baseURL: 'http://127.0.0.1:5173',
+    baseURL: testBaseUrl || 'http://localhost:5173',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
-  webServer: {
+  webServer: isRemote ? undefined : {
     command: 'npm run dev',
-    url: 'http://127.0.0.1:5173',
+    url: 'http://localhost:5173',
     reuseExistingServer: false,
     timeout: 120_000,
     env: {

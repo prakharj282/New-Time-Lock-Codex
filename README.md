@@ -22,14 +22,16 @@ The React app runs on `http://localhost:5173` and proxies `/api/*` to the local 
 
 You can verify the API is ready at `http://localhost:5173/api/health`.
 
-## End-To-End Tests
+If the app shows `API route not found (404)`, the frontend is running without the Express API. Use `npm run dev`, `npm start`, or `npm run preview`; do not serve `dist` with a static-only server.
 
-E2E tests use a dedicated Postgres database and delete only notes whose IDs or titles are marked for E2E.
+## Automated Tests
+
+Automated tests use a dedicated Postgres database and delete only notes whose IDs or titles are marked for E2E.
 
 ```sh
 TEST_DATABASE_URL=postgres://user:password@host:5432/timelocknotes_test
 ENCRYPTION_KEY=replace-with-a-long-random-secret
-npm run test:e2e
+npm run test:all
 ```
 
 PowerShell:
@@ -37,23 +39,25 @@ PowerShell:
 ```powershell
 $env:TEST_DATABASE_URL="postgres://user:password@host:5432/timelocknotes_test"
 $env:ENCRYPTION_KEY="replace-with-a-long-random-secret"
-npm run test:e2e
+npm run verify:release
 ```
 
 Do not point `TEST_DATABASE_URL` at production data.
+
+See [docs/TESTING.md](docs/TESTING.md) for the local, Vercel Preview, and production smoke test gates.
 
 ## Production Build
 
 ```sh
 npm run build
-npm start
+npm run preview
 ```
 
-`npm start` serves the built `dist` frontend and the Express API from one local Node process.
+`npm run preview` builds the frontend and serves the built `dist` frontend plus the Express API from one local Node process.
 
 ## Vercel Deployment
 
-Vercel serves the built Vite app from `dist` and runs the Express API through `api/[...path].ts`.
+Vercel serves the built Vite app from `dist` and routes `/api/*` to the Express API through `api/index.ts`.
 
 Use these Vercel settings:
 
