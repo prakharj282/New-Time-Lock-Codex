@@ -5,6 +5,7 @@ import { EmergencyUnlockModal } from './EmergencyUnlockModal';
 import { CanvasContentViewer } from './CanvasContentViewer';
 import { formatUnlockTime } from '../utils/time';
 import * as store from '../utils/storage';
+import { compressPhotoFile } from '../utils/photo';
 import { isWithinSchedule, getScheduleByDay, getScheduleState, getNextScheduleEvent, getActiveSlotForNow, getNextUpcomingSlot } from '../utils/storage';
 import type { ScheduleEvent } from '../utils/storage';
 
@@ -32,7 +33,8 @@ type ViewType = 'detail' | 'lock' | 'extendLock' | 'extendGibberish' | 'emergenc
 interface NoteDetailProps {
     note: AppNote;
     isUnsaved: boolean;
-    onBack: () => void;
+    onBack: (savedNote?: AppNote) => void;
+    onNoteSaved?: (savedNote: AppNote) => void;
 }
 
 function getWeekStartMs(): number {
@@ -45,7 +47,7 @@ function getWeekStartMs(): number {
     return weekStart.getTime();
 }
 
-export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
+export function NoteDetail({ note, isUnsaved, onBack, onNoteSaved }: NoteDetailProps) {
     const [title, setTitle] = useState(note.title);
     const [content, setContent] = useState('');
     const [isLoading, setIsLoading] = useState(true);
@@ -93,25 +95,22 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
     const isNewNote = isUnsaved && !note.restricted;
     const fileInputRef = useRef<HTMLInputElement>(null);
 
-    const handlePhotoCapture = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const handlePhotoCapture = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
-        const maxSize = 7 * 1024 * 1024;
-        if (file.size > maxSize) {
-            alert('Photo is too large (max 7 MB). Please try a smaller image or lower camera resolution.');
-            return;
-        }
-        const reader = new FileReader();
-        reader.onload = () => {
-            const dataUrl = reader.result as string;
-            const imageJson = JSON.stringify({ type: 'image', data: dataUrl });
+        setError('');
+        try {
+            const photo = await compressPhotoFile(file);
+            const imageJson = JSON.stringify({ type: 'image', data: photo.dataUrl });
             setContent(imageJson);
             if (title === 'New Note' || title === '') {
                 const now = new Date();
                 setTitle(`Photo ${now.toLocaleDateString()} ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
             }
-        };
-        reader.readAsDataURL(file);
+        } catch (err) {
+            setError(store.getErrorMessage(err, 'Could not prepare photo. Please try a smaller image.'));
+            e.target.value = '';
+        }
     };
 
     const [extendMode, setExtendMode] = useState<'duration' | 'datetime'>('duration');
@@ -222,7 +221,9 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
         try {
             const result = await store.updateTitle(localNote.id, title);
             if (result.success) {
-                setLocalNote(prev => ({ ...prev, title }));
+                const savedNote = result.note || { ...localNote, title };
+                setLocalNote(savedNote);
+                onNoteSaved?.(savedNote);
             }
         } catch (err) {
             setError(store.getErrorMessage(err, 'Failed to save title.'));
@@ -248,7 +249,7 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
             } else {
                 setLocalNote(updatedNote as AppNote);
             }
-            onBack();
+            onBack(result.note || updatedNote as AppNote);
             return true;
         } catch (err) {
             setError(store.getErrorMessage(err, 'Failed to save note.'));
@@ -304,7 +305,7 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
             const result = await store.emergencyUnlock(localNote.id);
             if (result.success && result.note) {
                 setLocalNote(result.note);
-                onBack();
+                onBack(result.note);
             } else {
                 setError(result.error || 'Failed to unlock note. Please try again.');
             }
@@ -324,7 +325,7 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
                 } else {
                     setLocalNote({ ...localNote, lockedUntil: null, emergencyOpenLog: [...eoLog, Date.now()] });
                 }
-                onBack();
+                onBack(result.note || { ...localNote, lockedUntil: null, emergencyOpenLog: [...eoLog, Date.now()] });
             } else if (result.error === 'quota_exhausted') {
                 setError(`Quota exhausted! You've used all ${result.limit} Emergency Opens this week.`);
             } else {
@@ -602,7 +603,7 @@ export function NoteDetail({ note, isUnsaved, onBack }: NoteDetailProps) {
     return (
         <div className="note-detail-card" style={{ position: 'relative' }}>
             <div className="note-detail-toolbar">
-                <button onClick={onBack} className="btn-back">
+                <button onClick={() => onBack()} className="btn-back">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
                     Back
                 </button>

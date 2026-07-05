@@ -16,21 +16,38 @@ function App() {
   const lastTapRef = useRef<number>(0);
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const unsavedNoteIdsRef = useRef<Set<string>>(new Set());
+  const notesRef = useRef<AppNote[]>([]);
 
   useEffect(() => {
     unsavedNoteIdsRef.current = unsavedNoteIds;
   }, [unsavedNoteIds]);
 
+  useEffect(() => {
+    notesRef.current = notes;
+  }, [notes]);
+
+  const hasScheduledNotes = useCallback(() => {
+    return notesRef.current.some(note => note.schedule?.enabled);
+  }, []);
+
   const mergeServerNotes = useCallback((serverNotes: AppNote[]) => {
     setNotes(prev => {
+      const previousById = new Map(prev.map(note => [note.id, note]));
+      const newestServerNotes = serverNotes.map(note => {
+        const previous = previousById.get(note.id);
+        if (previous?.updatedAt && note.updatedAt && previous.updatedAt > note.updatedAt) {
+          return previous;
+        }
+        return note;
+      });
       const unsavedNotes = prev.filter(note => unsavedNoteIdsRef.current.has(note.id));
       if (unsavedNotes.length === 0) {
-        return serverNotes;
+        return newestServerNotes;
       }
 
-      const serverNoteIds = new Set(serverNotes.map(note => note.id));
+      const serverNoteIds = new Set(newestServerNotes.map(note => note.id));
       return [
-        ...serverNotes,
+        ...newestServerNotes,
         ...unsavedNotes.filter(note => !serverNoteIds.has(note.id)),
       ];
     });
@@ -56,6 +73,7 @@ function App() {
 
     // Schedule enforcement — check every 30s
     const scheduleInterval = setInterval(async () => {
+      if (!hasScheduledNotes()) return;
       try {
         const result = await store.applySchedules();
         if (result.updated) {
@@ -68,6 +86,7 @@ function App() {
 
     // Also check schedules immediately
     const immediateSchedule = setTimeout(async () => {
+      if (!hasScheduledNotes()) return;
       try {
         const result = await store.applySchedules();
         if (result.updated) {
@@ -83,11 +102,12 @@ function App() {
       clearInterval(scheduleInterval);
       clearTimeout(immediateSchedule);
     };
-  }, [loadNotes, mergeServerNotes]);
+  }, [hasScheduledNotes, loadNotes, mergeServerNotes]);
 
   // Re-run schedule checks when notes change
   useEffect(() => {
     if (notes.length === 0) return;
+    if (!notes.some(note => note.schedule?.enabled)) return;
     (async () => {
       try {
         const result = await store.applySchedules();
@@ -98,7 +118,7 @@ function App() {
         setAppError(store.getErrorMessage(err, 'Could not apply schedules.'));
       }
     })();
-  }, [notes.length, mergeServerNotes]);
+  }, [notes, mergeServerNotes]);
 
   const handleRefresh = async () => {
     const now = Date.now();
@@ -205,14 +225,24 @@ function App() {
           <NoteDetail
             note={activeNote}
             isUnsaved={unsavedNoteIds.has(activeNoteId!)}
-            onBack={() => {
+            onNoteSaved={(savedNote) => {
+              setNotes(prev => [savedNote, ...prev.filter(note => note.id !== savedNote.id)]);
+            }}
+            onBack={(savedNote) => {
+              const noteId = activeNoteId!;
               setUnsavedNoteIds(prev => {
                 const next = new Set(prev);
-                next.delete(activeNoteId!);
+                next.delete(noteId);
+                unsavedNoteIdsRef.current = next;
                 return next;
               });
+              if (savedNote) {
+                setNotes(prev => [savedNote, ...prev.filter(note => note.id !== savedNote.id)]);
+              }
               setActiveNoteId(null);
-              loadNotes();
+              if (!savedNote) {
+                loadNotes();
+              }
             }}
           />
         ) : activeNoteId ? (

@@ -113,6 +113,7 @@ describe('storage and schedule helpers', () => {
     );
     expect(getResponseError({ error: 'Failed to save note' }, 500)).toBe('Failed to save note');
     expect(getResponseError({}, 404)).toContain('API route not found');
+    expect(getResponseError({}, 413)).toBe('Photo is too large for Vercel. Retake or choose a smaller image.');
     expect(getResponseError({}, 418)).toBe('API error: 418');
   });
 });

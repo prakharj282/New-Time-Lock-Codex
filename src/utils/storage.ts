@@ -60,6 +60,9 @@ export function getResponseError(data: unknown, status: number): string {
   if (status === 404) {
     return 'API route not found (404). Make sure you are running the full app server and Vercel routes /api/* to the Express function.';
   }
+  if (status === 413) {
+    return 'Photo is too large for Vercel. Retake or choose a smaller image.';
+  }
   return `API error: ${status}`;
 }
 

@@ -6,6 +6,37 @@ const tinyPng = Buffer.from(
   'base64'
 );
 
+function createLargeBmp(width: number, height: number) {
+  const rowSize = Math.ceil((width * 3) / 4) * 4;
+  const pixelDataSize = rowSize * height;
+  const fileSize = 54 + pixelDataSize;
+  const buffer = Buffer.alloc(fileSize);
+
+  buffer.write('BM', 0, 'ascii');
+  buffer.writeUInt32LE(fileSize, 2);
+  buffer.writeUInt32LE(54, 10);
+  buffer.writeUInt32LE(40, 14);
+  buffer.writeInt32LE(width, 18);
+  buffer.writeInt32LE(height, 22);
+  buffer.writeUInt16LE(1, 26);
+  buffer.writeUInt16LE(24, 28);
+  buffer.writeUInt32LE(pixelDataSize, 34);
+
+  for (let y = 0; y < height; y++) {
+    const rowOffset = 54 + y * rowSize;
+    for (let x = 0; x < width; x++) {
+      const offset = rowOffset + x * 3;
+      buffer[offset] = (x + y) % 256;
+      buffer[offset + 1] = Math.floor((y / height) * 255);
+      buffer[offset + 2] = Math.floor((x / width) * 255);
+    }
+  }
+
+  return buffer;
+}
+
+const largeBmp = createLargeBmp(2200, 1800);
+
 function noteCard(page: Page, title: string) {
   const escapedTitle = title.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   return page.locator(`[data-testid="note-card"][data-note-title="${escapedTitle}"]`);
@@ -16,12 +47,13 @@ async function openNote(page: Page, title: string) {
 }
 
 async function createTextNote(page: Page, title: string, body: string) {
+  await page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {});
   await page.getByTestId('create-note').click();
   await expect(page.getByTestId('note-content-input')).toBeVisible();
   await page.getByTestId('note-title-input').fill(title);
   await page.getByTestId('note-content-input').fill(body);
   await page.getByTestId('save-note').click();
-  await expect(noteCard(page, title)).toBeVisible();
+  await expect(noteCard(page, title)).toBeVisible({ timeout: 30_000 });
 }
 
 async function emergencyUnlockCurrentNote(page: Page, minLength: number) {
@@ -78,6 +110,8 @@ test.describe.serial('TimeLock Notes core flows', () => {
   const failedDeleteTitle = `${E2E_TITLE_PREFIX} ${runId} failed delete`;
   const exhaustedEmergencyTitle = `${E2E_TITLE_PREFIX} ${runId} emergency exhausted`;
   const offWindowScheduleTitle = `${E2E_TITLE_PREFIX} ${runId} schedule off window`;
+  const largePhotoTitle = `${E2E_TITLE_PREFIX} ${runId} large photo`;
+  const photo413Title = `${E2E_TITLE_PREFIX} ${runId} photo 413`;
 
   test.beforeAll(async ({ request }) => {
     const health = await request.get('/api/health');
@@ -197,6 +231,34 @@ test.describe.serial('TimeLock Notes core flows', () => {
 
     await expect(page.getByTestId('note-error')).toContainText('Simulated delete failure');
     await expect(page.getByTestId('note-content-input')).toHaveValue('Failed delete body');
+  });
+
+  test('photo save failures from Vercel 413 show inline errors and keep the editor open', async ({ page }) => {
+    await page.goto('/');
+    await page.getByTestId('create-note').click();
+    await page.getByTestId('note-title-input').fill(photo413Title);
+    await page.getByTestId('photo-input').setInputFiles({
+      name: 'tiny.png',
+      mimeType: 'image/png',
+      buffer: tinyPng,
+    });
+    await expect(page.getByTestId('photo-note-image')).toBeVisible();
+
+    await page.route('**/api/notes/*', async (route) => {
+      if (route.request().method() === 'PUT') {
+        await route.fulfill({
+          status: 413,
+          contentType: 'application/json',
+          body: JSON.stringify({}),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.getByTestId('save-note').click();
+    await expect(page.getByTestId('note-error')).toContainText('Photo is too large for Vercel');
+    await expect(page.getByTestId('photo-note-image')).toBeVisible();
   });
 
   test('create, save, reload, edit, lock, emergency unlock, and delete', async ({ page }) => {
@@ -432,6 +494,45 @@ test.describe.serial('TimeLock Notes core flows', () => {
     await page.getByTestId('apply-lock').click();
 
     await openNote(page, photoTitle);
+    await expect(page.getByText('Note is Locked')).toBeVisible();
+    await expect(page.getByTestId('photo-note-image')).toHaveCount(0);
+  });
+
+  test('large photo is compressed before save and lock', async ({ page }) => {
+    expect(largeBmp.length).toBeGreaterThan(4.5 * 1024 * 1024);
+
+    await page.goto('/');
+    await page.getByTestId('create-note').click();
+    await page.getByTestId('note-title-input').fill(largePhotoTitle);
+    await page.getByTestId('photo-input').setInputFiles({
+      name: 'large.bmp',
+      mimeType: 'image/bmp',
+      buffer: largeBmp,
+    });
+
+    await expect(page.getByTestId('photo-note-image')).toBeVisible();
+    const payloadBytes = await page.evaluate(() => {
+      const image = document.querySelector('[data-testid="photo-note-image"]') as HTMLImageElement | null;
+      if (!image?.src) return 0;
+      return new TextEncoder().encode(JSON.stringify({ type: 'image', data: image.src })).byteLength;
+    });
+    expect(payloadBytes).toBeGreaterThan(0);
+    expect(payloadBytes).toBeLessThan(2.5 * 1024 * 1024);
+
+    await page.getByTestId('save-note').click();
+    await expect(noteCard(page, largePhotoTitle)).toBeVisible();
+    await page.reload();
+    await expect(noteCard(page, largePhotoTitle).locator('img')).toBeVisible();
+
+    await openNote(page, largePhotoTitle);
+    await expect(page.getByTestId('photo-note-image')).toBeVisible();
+    await page.getByTestId('lock-note').click();
+    await page.getByTestId('emergency-length-input').fill('20');
+    await page.getByTestId('lock-hours').fill('2');
+    await page.getByTestId('lock-minutes').fill('0');
+    await page.getByTestId('apply-lock').click();
+
+    await openNote(page, largePhotoTitle);
     await expect(page.getByText('Note is Locked')).toBeVisible();
     await expect(page.getByTestId('photo-note-image')).toHaveCount(0);
   });

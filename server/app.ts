@@ -41,6 +41,9 @@ function getPool(): Pool {
     pool = new Pool({
       connectionString: poolConnectionString,
       ssl: needsSsl ? { rejectUnauthorized: false } : undefined,
+      max: 30,
+      connectionTimeoutMillis: 10_000,
+      idleTimeoutMillis: 10_000,
     });
   }
   return pool;
