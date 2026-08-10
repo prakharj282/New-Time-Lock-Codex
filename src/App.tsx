@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { NoteList } from './components/NoteList';
 import { NoteDetail } from './components/NoteDetail';
+import { PartnerAccessPanel } from './components/PartnerAccessPanel';
 import * as store from './utils/storage';
 import type { Note } from './utils/storage';
 import './index.css';
@@ -12,11 +13,13 @@ function App() {
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
   const [unsavedNoteIds, setUnsavedNoteIds] = useState<Set<string>>(new Set());
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [showPartnerAccess, setShowPartnerAccess] = useState(false);
   const [appError, setAppError] = useState('');
   const lastTapRef = useRef<number>(0);
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const unsavedNoteIdsRef = useRef<Set<string>>(new Set());
   const notesRef = useRef<AppNote[]>([]);
+  const activeNoteIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     unsavedNoteIdsRef.current = unsavedNoteIds;
@@ -25,6 +28,10 @@ function App() {
   useEffect(() => {
     notesRef.current = notes;
   }, [notes]);
+
+  useEffect(() => {
+    activeNoteIdRef.current = activeNoteId;
+  }, [activeNoteId]);
 
   const hasScheduledNotes = useCallback(() => {
     return notesRef.current.some(note => note.schedule?.enabled);
@@ -35,21 +42,30 @@ function App() {
       const previousById = new Map(prev.map(note => [note.id, note]));
       const newestServerNotes = serverNotes.map(note => {
         const previous = previousById.get(note.id);
-        if (previous?.updatedAt && note.updatedAt && previous.updatedAt > note.updatedAt) {
-          return previous;
+        if (previous?.updatedAt && note.updatedAt) {
+          if (previous.updatedAt > note.updatedAt) return previous;
+          if (previous.updatedAt === note.updatedAt && JSON.stringify(previous) === JSON.stringify(note)) {
+            return previous;
+          }
         }
         return note;
       });
-      const unsavedNotes = prev.filter(note => unsavedNoteIdsRef.current.has(note.id));
-      if (unsavedNotes.length === 0) {
-        return newestServerNotes;
-      }
-
+      const locallyProtectedNotes = prev.filter(note => (
+        unsavedNoteIdsRef.current.has(note.id) || note.id === activeNoteIdRef.current
+      ));
       const serverNoteIds = new Set(newestServerNotes.map(note => note.id));
-      return [
-        ...newestServerNotes,
-        ...unsavedNotes.filter(note => !serverNoteIds.has(note.id)),
-      ];
+      const mergedNotes = locallyProtectedNotes.length === 0
+        ? newestServerNotes
+        : [
+          ...newestServerNotes,
+          ...locallyProtectedNotes.filter(note => !serverNoteIds.has(note.id)),
+        ];
+
+      if (mergedNotes.length === prev.length
+        && mergedNotes.every((note, index) => note === prev[index])) {
+        return prev;
+      }
+      return mergedNotes;
     });
   }, []);
 
@@ -103,6 +119,29 @@ function App() {
       clearTimeout(immediateSchedule);
     };
   }, [hasScheduledNotes, loadNotes, mergeServerNotes]);
+
+  useEffect(() => {
+    const refreshVisibleNotes = () => {
+      if (document.visibilityState !== 'visible') return;
+      void loadNotes();
+    };
+
+    const pollInterval = setInterval(refreshVisibleNotes, 3_000);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshVisibleNotes();
+      }
+    };
+
+    window.addEventListener('focus', refreshVisibleNotes);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      clearInterval(pollInterval);
+      window.removeEventListener('focus', refreshVisibleNotes);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [loadNotes]);
 
   // Re-run schedule checks when notes change
   useEffect(() => {
@@ -181,6 +220,10 @@ function App() {
     setUnsavedNoteIds(prev => new Set(prev).add(newNote.id));
   };
 
+  const closePartnerAccess = useCallback(() => {
+    setShowPartnerAccess(false);
+  }, []);
+
   const activeNote = notes.find((n) => n.id === activeNoteId);
 
   return (
@@ -188,7 +231,14 @@ function App() {
       {!activeNoteId && (
         <header>
           <h1>TimeLock Notes</h1>
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <div className="header-actions">
+            <button
+              type="button"
+              onClick={() => setShowPartnerAccess(true)}
+              data-testid="partner-access-open"
+            >
+              Partner
+            </button>
             <button
               onClick={handleRefresh}
               onPointerDown={handleRefreshPointerDown}
@@ -213,6 +263,10 @@ function App() {
           </div>
         </header>
       )}
+
+      {showPartnerAccess ? (
+        <PartnerAccessPanel onClose={closePartnerAccess} />
+      ) : null}
 
       {appError && (
         <div className="error-banner" data-testid="app-error" role="alert">

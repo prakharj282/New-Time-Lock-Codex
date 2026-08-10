@@ -24,6 +24,14 @@ You can verify the API is ready at `http://localhost:5173/api/health`.
 
 If the app shows `API route not found (404)`, the frontend is running without the Express API. Use `npm run dev`, `npm start`, or `npm run preview`; do not serve `dist` with a static-only server.
 
+## Accountability Partner Access
+
+Open **Partner** in the main-page header to create a one-time share link. The partner opens the separate `/partner` page, creates their own six-digit PIN, and can then see and unlock only notes that are currently locked. The owner cannot set, view, or reset that PIN; revoke or replace the link to recover from a lost PIN.
+
+Partner invitation secrets stay in the URL fragment, PINs are stored only as salted `scrypt` hashes, and partner sessions use hashed random tokens in strict `HttpOnly` cookies. Unlocking a scheduled note bypasses only its current active window and leaves future recurrence enabled.
+
+The main application and its legacy APIs remain public by design. Partner access is an emergency workflow, not an authentication boundary for the owner application or database.
+
 ## Automated Tests
 
 Automated tests use a dedicated Postgres database and delete only notes whose IDs or titles are marked for E2E.

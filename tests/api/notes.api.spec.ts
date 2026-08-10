@@ -208,7 +208,11 @@ describe('Express notes API', () => {
       restricted: true,
     });
 
-    expect(await apiJson<{ content: string }>(`/api/notes/${id}/content`)).toEqual({ content: 'locked body' });
+    const blockedContent = await api(`/api/notes/${id}/content`);
+    expect(blockedContent.status).toBe(423);
+    expect(await blockedContent.json()).toEqual({ error: expect.any(String) });
+
+    const encryptedBeforeTitleChange = await dbPool.query('SELECT content FROM notes WHERE id = $1', [id]);
     const notesAfterBlockedSave = await apiJson<Array<{ id: string; title: string }>>('/api/notes');
     expect(notesAfterBlockedSave.find(note => note.id === id)?.title).toBe(originalTitle);
 
@@ -217,6 +221,11 @@ describe('Express notes API', () => {
       body: JSON.stringify({ title: `${E2E_TITLE_PREFIX} ${runId} locked title changed` }),
     });
     expect(titleResult.note.title).toContain('title changed');
+    const encryptedAfterTitleChange = await dbPool.query('SELECT content FROM notes WHERE id = $1', [id]);
+    expect(encryptedAfterTitleChange.rows[0].content).toBe(encryptedBeforeTitleChange.rows[0].content);
+
+    expect(await apiJson<{ success: boolean }>(`/api/notes/${id}/emergency-unlock`, { method: 'POST' }))
+      .toMatchObject({ success: true });
     expect(await apiJson<{ content: string }>(`/api/notes/${id}/content`)).toEqual({ content: 'locked body' });
   });
 

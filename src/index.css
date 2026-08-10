@@ -75,7 +75,7 @@ body {
   width: 100%;
 }
 
-header {
+.app-container > header {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -83,7 +83,14 @@ header {
   gap: 12px;
 }
 
-h1 {
+.header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.app-container > header h1 {
   font-size: 24px;
   font-weight: 700;
   background: linear-gradient(135deg, #60a5fa 0%, #818cf8 50%, #a78bfa 100%);
@@ -1564,6 +1571,15 @@ input[type="time"] {
 /* ─── Mobile Responsive ─── */
 
 @media (max-width: 768px) {
+  .app-container > header {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .header-actions {
+    flex-wrap: wrap;
+  }
+
   body {
     padding: 0;
     padding-top: var(--safe-top);
@@ -1574,7 +1590,7 @@ input[type="time"] {
     padding: 0 12px;
   }
 
-  h1 {
+  .app-container > header h1 {
     font-size: 20px;
   }
 

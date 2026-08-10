@@ -1,7 +1,8 @@
 import 'dotenv/config';
 import express from 'express';
-import { Pool } from 'pg';
+import { Pool, type PoolClient } from 'pg';
 import crypto from 'crypto';
+import { createAccountabilityRouter } from './accountability';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -101,6 +102,7 @@ interface DbNote {
   emergency_open_per_week: number;
   emergency_open_log: number[];
   schedule: NoteSchedule | null;
+  schedule_override_until: string | null;
   deleted_at: string | null;
   restricted: boolean;
 }
@@ -137,10 +139,10 @@ function dbToNote(row: DbNote) {
   };
 }
 
-async function initDatabase() {
-  const schemaResult = await getPool().query('SELECT current_schema() AS schema');
+async function runDatabaseMigrations(client: PoolClient) {
+  const schemaResult = await client.query('SELECT current_schema() AS schema');
   const activeSchema = schemaResult.rows[0]?.schema || 'public';
-  const existingIdColumn = await getPool().query(`
+  const existingIdColumn = await client.query(`
     SELECT data_type
     FROM information_schema.columns
     WHERE table_schema = $1 AND table_name = 'notes' AND column_name = 'id'
@@ -148,11 +150,11 @@ async function initDatabase() {
 
   if (existingIdColumn.rows.length > 0 && existingIdColumn.rows[0].data_type !== 'text') {
     const backupName = `notes_supabase_sample_backup_${Date.now()}`;
-    await getPool().query(`ALTER TABLE notes RENAME TO "${backupName}"`);
+    await client.query(`ALTER TABLE notes RENAME TO "${backupName}"`);
     console.warn(`Existing incompatible notes table was renamed to ${backupName}`);
   }
 
-  await getPool().query(`
+  await client.query(`
     CREATE TABLE IF NOT EXISTS notes (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL DEFAULT 'New Note',
@@ -166,31 +168,97 @@ async function initDatabase() {
       emergency_open_per_week INTEGER NOT NULL DEFAULT 0,
       emergency_open_log JSONB NOT NULL DEFAULT '[]'::JSONB,
       schedule JSONB NOT NULL DEFAULT '{"enabled": false, "days": [], "slots": []}'::JSONB,
+      schedule_override_until BIGINT,
       deleted_at BIGINT,
       restricted BOOLEAN NOT NULL DEFAULT FALSE
     );
   `);
-  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT 'New Note'`).catch(() => {});
-  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS content TEXT NOT NULL DEFAULT ''`).catch(() => {});
-  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT`).catch(() => {});
-  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT`).catch(() => {});
-  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS locked_until BIGINT`).catch(() => {});
-  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS emergency_length INTEGER`).catch(() => {});
-  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS hide_typos BOOLEAN NOT NULL DEFAULT FALSE`).catch(() => {});
-  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS emergency_open_enabled BOOLEAN NOT NULL DEFAULT FALSE`).catch(() => {});
-  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS emergency_open_per_week INTEGER NOT NULL DEFAULT 0`).catch(() => {});
-  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS emergency_open_log JSONB NOT NULL DEFAULT '[]'::JSONB`).catch(() => {});
-  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS schedule JSONB NOT NULL DEFAULT '{"enabled": false, "days": [], "slots": []}'::JSONB`).catch(() => {});
-  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS deleted_at BIGINT`).catch(() => {});
-  await getPool().query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS restricted BOOLEAN NOT NULL DEFAULT FALSE`).catch(() => {});
-  await getPool().query(`ALTER TABLE notes DROP COLUMN IF EXISTS schedule_override_until`).catch(() => {});
-  await getPool().query(`
+  await client.query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT 'New Note'`);
+  await client.query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS content TEXT NOT NULL DEFAULT ''`);
+  await client.query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT`);
+  await client.query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT`);
+  await client.query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS locked_until BIGINT`);
+  await client.query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS emergency_length INTEGER`);
+  await client.query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS hide_typos BOOLEAN NOT NULL DEFAULT FALSE`);
+  await client.query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS emergency_open_enabled BOOLEAN NOT NULL DEFAULT FALSE`);
+  await client.query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS emergency_open_per_week INTEGER NOT NULL DEFAULT 0`);
+  await client.query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS emergency_open_log JSONB NOT NULL DEFAULT '[]'::JSONB`);
+  await client.query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS schedule JSONB NOT NULL DEFAULT '{"enabled": false, "days": [], "slots": []}'::JSONB`);
+  await client.query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS schedule_override_until BIGINT`);
+  await client.query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS deleted_at BIGINT`);
+  await client.query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS restricted BOOLEAN NOT NULL DEFAULT FALSE`);
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS accountability_access (
+      id SMALLINT PRIMARY KEY CHECK (id = 1),
+      invite_token_hash BYTEA NOT NULL,
+      pin_hash TEXT,
+      claimed_at BIGINT,
+      failed_attempts INTEGER NOT NULL DEFAULT 0 CHECK (failed_attempts >= 0),
+      rate_limited_until BIGINT,
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+  `);
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS accountability_sessions (
+      token_hash BYTEA PRIMARY KEY,
+      access_id SMALLINT NOT NULL REFERENCES accountability_access(id) ON DELETE CASCADE,
+      created_at DOUBLE PRECISION NOT NULL,
+      expires_at DOUBLE PRECISION NOT NULL
+    );
+  `);
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS accountability_sessions_expires_at_idx
+    ON accountability_sessions (expires_at);
+  `);
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS accountability_unlock_events (
+      id BIGSERIAL PRIMARY KEY,
+      note_id TEXT NOT NULL,
+      access_id SMALLINT NOT NULL,
+      unlocked_at BIGINT NOT NULL,
+      lock_kind TEXT NOT NULL CHECK (lock_kind IN ('timer', 'always', 'schedule')),
+      previous_locked_until BIGINT NOT NULL,
+      schedule_override_until BIGINT
+    );
+  `);
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS accountability_unlock_events_note_time_idx
+    ON accountability_unlock_events (note_id, unlocked_at DESC);
+  `);
+  await client.query(`
     CREATE TABLE IF NOT EXISTS app_state (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
   `);
-  console.log('Database schema initialized');
+  const requiredColumn = await client.query(
+    `SELECT 1
+     FROM information_schema.columns
+     WHERE table_schema = $1
+       AND table_name = 'notes'
+       AND column_name = 'schedule_override_until'`,
+    [activeSchema],
+  );
+  if (requiredColumn.rows.length !== 1) {
+    throw new Error('Database schema initialization did not create all required columns.');
+  }
+}
+
+async function initDatabase() {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('timelock_notes_schema_v2'))");
+    await runDatabaseMigrations(client);
+    await client.query('COMMIT');
+    console.log('Database schema initialized');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 let databaseInitPromise: Promise<void> | null = null;
@@ -240,6 +308,12 @@ app.use('/api', async (req, res, next) => {
   }
 });
 
+app.use('/api/accountability', createAccountabilityRouter({
+  getPool,
+  getEncryptionKey,
+  getActiveSlotEnd,
+}));
+
 app.get('/api/notes', async (_req, res) => {
   try {
     const result = await getPool().query(
@@ -255,8 +329,14 @@ app.get('/api/notes', async (_req, res) => {
 
 app.get('/api/notes/:id/content', async (req, res) => {
   try {
-    const result = await getPool().query('SELECT content FROM notes WHERE id = $1', [req.params.id]);
+    const result = await getPool().query(
+      'SELECT content, locked_until FROM notes WHERE id = $1 AND deleted_at IS NULL',
+      [req.params.id]
+    );
     if (result.rows.length === 0) return res.json({ content: '' });
+    if (result.rows[0].locked_until && Number(result.rows[0].locked_until) > Date.now()) {
+      return res.status(423).json({ error: 'locked' });
+    }
     const decrypted = decrypt(result.rows[0].content || '');
     res.json({ content: decrypted });
   } catch (err) {
@@ -266,26 +346,60 @@ app.get('/api/notes/:id/content', async (req, res) => {
 });
 
 app.put('/api/notes/:id', async (req, res) => {
+  const client = await getPool().connect();
   try {
     const { note, rawContent } = req.body;
+    if (!note || typeof note !== 'object') {
+      return res.status(400).json({ error: 'Note is required' });
+    }
     const id = req.params.id;
     const encryptedContent = encrypt(rawContent || '');
-    const now = Date.now();
 
-    const existing = await getPool().query('SELECT restricted, content, title, locked_until FROM notes WHERE id = $1', [id]);
+    await client.query('BEGIN');
+    const existing = await client.query(
+      `SELECT n.restricted, n.content, n.title, n.locked_until, n.schedule,
+              n.schedule_override_until, n.updated_at,
+              (
+                SELECT MAX(event.unlocked_at)
+                FROM accountability_unlock_events event
+                WHERE event.note_id = n.id
+              ) AS last_partner_unlocked_at
+       FROM notes n WHERE n.id = $1 FOR UPDATE`,
+      [id]
+    );
     const existingRow = existing.rows.length > 0 ? existing.rows[0] : null;
+    const now = Math.max(Date.now(), Number(existingRow?.updated_at || 0) + 1);
     const existingRestricted = existingRow ? existingRow.restricted : false;
-    const existingLocked = !!existingRow?.locked_until && Number(existingRow.locked_until) > Date.now();
+    const existingLocked = !!existingRow?.locked_until && Number(existingRow.locked_until) > now;
+    const clientUpdatedAt = Number(note.updatedAt || 0);
+    const scheduleOverrideActive = !!existingRow?.schedule_override_until
+      && Number(existingRow.schedule_override_until) > now;
+    const partnerUnlockIsNewer = !!existingRow?.last_partner_unlocked_at
+      && Number(existingRow.last_partner_unlocked_at) > clientUpdatedAt;
+    const preservePartnerUnlock = !!existingRow
+      && Number(existingRow.updated_at) > clientUpdatedAt
+      && (partnerUnlockIsNewer || scheduleOverrideActive);
+    const preserveServerData = existingLocked || preservePartnerUnlock;
     const finalRestricted = existingRestricted || (note.restricted || false);
-    const finalContent = existingLocked ? existingRow.content : encryptedContent;
-    const finalTitle = existingLocked ? existingRow.title : (note.title || 'New Note');
+    const finalContent = preserveServerData ? existingRow.content : encryptedContent;
+    const finalTitle = preserveServerData ? existingRow.title : (note.title || 'New Note');
 
-    let lockedUntil = note.lockedUntil || null;
-    const schedule = note.schedule || { enabled: false, days: [], slots: [] };
+    let lockedUntil = preservePartnerUnlock
+      ? (existingRow.locked_until ? Number(existingRow.locked_until) : null)
+      : (note.lockedUntil || null);
+    if (existingLocked) {
+      const currentLockedUntil = Number(existingRow.locked_until);
+      if (!lockedUntil || Number(lockedUntil) < currentLockedUntil) {
+        lockedUntil = currentLockedUntil;
+      }
+    }
+    const schedule = preservePartnerUnlock
+      ? (existingRow.schedule || { enabled: false, days: [], slots: [] })
+      : (note.schedule || { enabled: false, days: [], slots: [] });
 
     const tz = schedule.timezone || req.body.timezone;
 
-    if (schedule.enabled && !lockedUntil) {
+    if (schedule.enabled && !lockedUntil && !scheduleOverrideActive) {
       if (isWithinSchedule(schedule, tz)) {
         const slotEnd = getActiveSlotEnd(schedule, tz);
         if (slotEnd) {
@@ -294,7 +408,7 @@ app.put('/api/notes/:id', async (req, res) => {
       }
     }
 
-    const result = await getPool().query(
+    const result = await client.query(
       `INSERT INTO notes (id, title, content, created_at, updated_at, locked_until, emergency_length, hide_typos, emergency_open_enabled, emergency_open_per_week, emergency_open_log, schedule, deleted_at, restricted)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        ON CONFLICT (id) DO UPDATE SET
@@ -328,10 +442,14 @@ app.put('/api/notes/:id', async (req, res) => {
         finalRestricted,
       ]
     );
+    await client.query('COMMIT');
     res.json({ success: true, note: dbToNote(result.rows[0]) });
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
     console.error('PUT /api/notes/:id error:', err);
     res.status(500).json({ error: 'Failed to save note' });
+  } finally {
+    client.release();
   }
 });
 
@@ -342,7 +460,7 @@ app.patch('/api/notes/:id/title', async (req, res) => {
       return res.status(400).json({ error: 'Title is required' });
     }
     const result = await getPool().query(
-      'UPDATE notes SET title = $1, updated_at = $2 WHERE id = $3 RETURNING *',
+      'UPDATE notes SET title = $1, updated_at = GREATEST($2, updated_at + 1) WHERE id = $3 RETURNING *',
       [title, Date.now(), req.params.id]
     );
     if (result.rows.length === 0) {
@@ -368,12 +486,28 @@ app.delete('/api/notes/:id', async (req, res) => {
 app.post('/api/notes/:id/extend-lock', async (req, res) => {
   try {
     const { additionalMs } = req.body;
-    const result = await getPool().query('SELECT locked_until FROM notes WHERE id = $1', [req.params.id]);
-    if (result.rows.length === 0 || !result.rows[0].locked_until) {
+    if (!Number.isSafeInteger(additionalMs) || additionalMs <= 0) {
+      return res.status(400).json({ error: 'Invalid lock extension' });
+    }
+    const requestStartedAt = Date.now();
+    const result = await getPool().query(
+      `UPDATE notes
+       SET locked_until = locked_until + $1,
+           updated_at = GREATEST($2, updated_at + 1)
+       WHERE id = $3
+         AND locked_until IS NOT NULL
+         AND locked_until > $2
+         AND NOT EXISTS (
+           SELECT 1 FROM accountability_unlock_events event
+           WHERE event.note_id = notes.id AND event.unlocked_at >= $2
+         )
+       RETURNING locked_until`,
+      [additionalMs, requestStartedAt, req.params.id]
+    );
+    if (result.rows.length === 0) {
       return res.json({ success: false });
     }
-    const newLockedUntil = Number(result.rows[0].locked_until) + additionalMs;
-    await getPool().query('UPDATE notes SET locked_until = $1, updated_at = $2 WHERE id = $3', [newLockedUntil, Date.now(), req.params.id]);
+    const newLockedUntil = Number(result.rows[0].locked_until);
     res.json({ success: true, lockedUntil: newLockedUntil });
   } catch (err) {
     console.error('POST /api/notes/:id/extend-lock error:', err);
@@ -384,9 +518,30 @@ app.post('/api/notes/:id/extend-lock', async (req, res) => {
 app.post('/api/notes/:id/set-lock-until', async (req, res) => {
   try {
     const { timestamp } = req.body;
-    const result = await getPool().query('SELECT id FROM notes WHERE id = $1', [req.params.id]);
-    if (result.rows.length === 0) return res.json({ success: false });
-    await getPool().query('UPDATE notes SET locked_until = $1, updated_at = $2 WHERE id = $3', [timestamp, Date.now(), req.params.id]);
+    if (!Number.isSafeInteger(timestamp) || timestamp <= 0) {
+      return res.status(400).json({ error: 'Invalid lock timestamp' });
+    }
+    const requestStartedAt = Date.now();
+    const result = await getPool().query(
+      `UPDATE notes
+       SET locked_until = $1, updated_at = GREATEST($2, updated_at + 1)
+       WHERE id = $3
+         AND (locked_until IS NULL OR locked_until <= $2 OR locked_until <= $1)
+         AND NOT EXISTS (
+           SELECT 1 FROM accountability_unlock_events event
+           WHERE event.note_id = notes.id AND event.unlocked_at >= $2
+         )
+       RETURNING locked_until`,
+      [timestamp, requestStartedAt, req.params.id]
+    );
+    if (result.rows.length === 0) {
+      const existing = await getPool().query('SELECT locked_until FROM notes WHERE id = $1', [req.params.id]);
+      if (existing.rows.length === 0) return res.json({ success: false });
+      return res.status(409).json({
+        error: 'lock_cannot_be_shortened',
+        lockedUntil: Number(existing.rows[0].locked_until),
+      });
+    }
     res.json({ success: true, lockedUntil: timestamp });
   } catch (err) {
     console.error('POST /api/notes/:id/set-lock-until error:', err);
@@ -423,7 +578,7 @@ app.post('/api/notes/:id/emergency-unlock', async (req, res) => {
     const disabledSchedule = { ...schedule, enabled: false };
 
     const updated = await getPool().query(
-      'UPDATE notes SET locked_until = NULL, schedule = $1, updated_at = $2 WHERE id = $3 RETURNING *',
+      'UPDATE notes SET locked_until = NULL, schedule_override_until = NULL, schedule = $1, updated_at = $2 WHERE id = $3 RETURNING *',
       [JSON.stringify(disabledSchedule), Date.now(), req.params.id]
     );
     res.json({ success: true, note: dbToNote(updated.rows[0]) });
@@ -462,7 +617,7 @@ app.post('/api/notes/:id/emergency-open', async (req, res) => {
     const disabledSchedule = { ...schedule, enabled: false };
 
     const updated = await getPool().query(
-      'UPDATE notes SET locked_until = NULL, emergency_open_log = $1, updated_at = $2, schedule = $3 WHERE id = $4 RETURNING *',
+      'UPDATE notes SET locked_until = NULL, schedule_override_until = NULL, emergency_open_log = $1, updated_at = $2, schedule = $3 WHERE id = $4 RETURNING *',
       [JSON.stringify(newLog), Date.now(), JSON.stringify(disabledSchedule), req.params.id]
     );
     res.json({ success: true, usedThisWeek: usedThisWeek + 1, limit: note.emergency_open_per_week, note: dbToNote(updated.rows[0]) });
@@ -484,12 +639,25 @@ app.post('/api/notes/apply-schedules', async (req, res) => {
 
       const inWindow = isWithinSchedule(schedule, clientTimezone);
       const isCurrentlyLocked = !!row.locked_until && Number(row.locked_until) > Date.now();
+      const hasActiveOverride = !!row.schedule_override_until
+        && Number(row.schedule_override_until) > Date.now();
 
-      if (inWindow && !isCurrentlyLocked) {
+      if (inWindow && !isCurrentlyLocked && !hasActiveOverride) {
         const slotEnd = getActiveSlotEnd(schedule, clientTimezone);
         if (slotEnd) {
-          await getPool().query('UPDATE notes SET locked_until = $1, updated_at = $2 WHERE id = $3', [slotEnd.getTime(), Date.now(), row.id]);
-          anyUpdated = true;
+          const updateStartedAt = Date.now();
+          const updated = await getPool().query(
+            `UPDATE notes
+             SET locked_until = $1,
+                 schedule_override_until = NULL,
+                 updated_at = GREATEST($2, updated_at + 1)
+             WHERE id = $3
+               AND (locked_until IS NULL OR locked_until <= $2)
+               AND (schedule_override_until IS NULL OR schedule_override_until <= $2)
+             RETURNING id`,
+            [slotEnd.getTime(), updateStartedAt, row.id]
+          );
+          if (updated.rows.length > 0) anyUpdated = true;
         }
       }
     }

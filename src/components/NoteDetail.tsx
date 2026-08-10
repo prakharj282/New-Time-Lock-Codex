@@ -64,10 +64,13 @@ export function NoteDetail({ note, isUnsaved, onBack, onNoteSaved }: NoteDetailP
             if (note.lockedUntil !== prev.lockedUntil) changes.lockedUntil = note.lockedUntil;
             if (note.title !== prev.title) { changes.title = note.title; setTitle(note.title); }
             if (JSON.stringify(note.schedule) !== JSON.stringify(prev.schedule)) changes.schedule = note.schedule;
+            if (note.updatedAt && (!prev.updatedAt || note.updatedAt > prev.updatedAt)) {
+                changes.updatedAt = note.updatedAt;
+            }
             if (Object.keys(changes).length > 0) return { ...prev, ...changes };
             return prev;
         });
-    }, [note.lockedUntil, note.title, JSON.stringify(note.schedule)]);
+    }, [note.lockedUntil, note.title, note.schedule, note.updatedAt]);
 
     useEffect(() => {
         const checkSchedule = async () => {
@@ -88,7 +91,7 @@ export function NoteDetail({ note, isUnsaved, onBack, onNoteSaved }: NoteDetailP
         checkSchedule();
         const interval = setInterval(checkSchedule, 10_000);
         return () => clearInterval(interval);
-    }, [localNote.id, localNote.schedule?.enabled]);
+    }, [localNote.id, localNote.lockedUntil, localNote.schedule]);
 
     const [eoEnabled, setEoEnabled] = useState(note.emergencyOpenEnabled || false);
     const [eoPerWeek, setEoPerWeek] = useState(note.emergencyOpenPerWeek || 2);
@@ -151,7 +154,6 @@ export function NoteDetail({ note, isUnsaved, onBack, onNoteSaved }: NoteDetailP
         return () => clearInterval(interval);
     }, [localNote.lockedUntil, isLocked, alwaysLocked]);
 
-    const detailScheduleKey = localNote.schedule?.enabled ? JSON.stringify(localNote.schedule) : '';
     useEffect(() => {
         if (!localNote.schedule?.enabled) { setScheduleNextEvent(null); setScheduleCountdown(''); return; }
         const update = () => {
@@ -170,7 +172,7 @@ export function NoteDetail({ note, isUnsaved, onBack, onNoteSaved }: NoteDetailP
         update();
         const interval = setInterval(update, 1000);
         return () => clearInterval(interval);
-    }, [detailScheduleKey, isLocked]);
+    }, [localNote.schedule, isLocked]);
 
     const weekStartMs = getWeekStartMs();
     const eoLog = localNote.emergencyOpenLog || [];
@@ -190,6 +192,12 @@ export function NoteDetail({ note, isUnsaved, onBack, onNoteSaved }: NoteDetailP
                 return;
             }
 
+            if (isLocked) {
+                setContent('');
+                setIsLoading(false);
+                return;
+            }
+
             try {
                 const decryptedContent = await store.getNoteContent(localNote.id);
                 if (!cancelled) {
@@ -200,7 +208,9 @@ export function NoteDetail({ note, isUnsaved, onBack, onNoteSaved }: NoteDetailP
                 console.error('Failed to load note content:', err);
                 if (!cancelled) {
                     setContent('');
-                    setError(store.getErrorMessage(err, 'Failed to load note content.'));
+                    if (!(err instanceof store.ApiError && err.status === 423)) {
+                        setError(store.getErrorMessage(err, 'Failed to load note content.'));
+                    }
                 }
             } finally {
                 if (!cancelled) {
@@ -213,7 +223,7 @@ export function NoteDetail({ note, isUnsaved, onBack, onNoteSaved }: NoteDetailP
         return () => {
             cancelled = true;
         };
-    }, [localNote.id, isUnsaved, note.content]);
+    }, [localNote.id, isLocked, isUnsaved, note.content]);
 
     const handleSaveTitle = async () => {
         setIsSaving(true);
