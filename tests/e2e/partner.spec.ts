@@ -94,7 +94,7 @@ test.describe.serial('Accountability partner flow', () => {
       await partner.goto(shareUrl);
       await expect(partner.getByTestId('partner-page')).toBeVisible();
       await expect(partner.getByTestId('partner-setup-form')).toBeVisible();
-      await expect.poll(() => partner.url()).not.toContain('#');
+      await expect(partner).toHaveURL(shareUrl);
 
       await partner.getByTestId('partner-setup-pin').fill('012345');
       await partner.getByTestId('partner-setup-confirm').fill('012345');
@@ -102,6 +102,7 @@ test.describe.serial('Accountability partner flow', () => {
 
       const noteList = partner.getByTestId('partner-note-list');
       await expect(noteList).toContainText(title);
+      await expect(partner).toHaveURL(shareUrl);
       await expect(partner.getByTestId(`partner-unlock-${noteId}`)).toBeVisible();
       expect(await partner.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth))
         .toBe(true);
@@ -109,7 +110,7 @@ test.describe.serial('Accountability partner flow', () => {
       const rateLimitContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
       const rateLimitedPartner = await rateLimitContext.newPage();
       try {
-        await rateLimitedPartner.goto(shareUrl);
+        await rateLimitedPartner.goto(partner.url());
         await expect(rateLimitedPartner.getByTestId('partner-login-form')).toBeVisible();
         for (let attempt = 0; attempt < 5; attempt += 1) {
           await rateLimitedPartner.getByTestId('partner-login-pin').fill('999999');
@@ -122,6 +123,18 @@ test.describe.serial('Accountability partner flow', () => {
           'UPDATE accountability_access SET failed_attempts = 0, rate_limited_until = NULL WHERE id = 1',
         );
         await rateLimitContext.close();
+      }
+
+      const secondDevice = await browser.newContext();
+      try {
+        const copiedLinkPage = await secondDevice.newPage();
+        await copiedLinkPage.goto(partner.url());
+        await copiedLinkPage.getByTestId('partner-login-pin').fill('012345');
+        await copiedLinkPage.getByTestId('partner-login-submit').click();
+        await expect(copiedLinkPage.getByTestId('partner-note-list')).toContainText(title);
+        await expect(copiedLinkPage).toHaveURL(shareUrl);
+      } finally {
+        await secondDevice.close();
       }
 
       await partner.getByTestId(`partner-unlock-${noteId}`).click();
@@ -177,6 +190,5 @@ test.describe.serial('Accountability partner flow', () => {
   test('invalid partner fragments render the unavailable state', async ({ page }) => {
     await page.goto('/partner#invalid-token');
     await expect(page.getByTestId('partner-link-unavailable')).toBeVisible();
-    await expect.poll(() => page.url()).not.toContain('#');
   });
 });

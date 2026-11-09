@@ -170,14 +170,6 @@ function readFragmentToken(): string | null {
   }
 }
 
-function clearFragment(): void {
-  window.history.replaceState(
-    window.history.state,
-    '',
-    `${window.location.pathname}${window.location.search}`,
-  );
-}
-
 function formatLockKind(lockKind: string): string {
   const normalized = lockKind.toLowerCase();
   if (normalized.includes('schedule')) return 'Scheduled lock';
@@ -238,7 +230,6 @@ export default function PartnerPage() {
   const [newPinConfirmation, setNewPinConfirmation] = useState('');
   const [pendingUnlock, setPendingUnlock] = useState<PartnerNote | null>(null);
   const [unlockingId, setUnlockingId] = useState<string | null>(null);
-  const tokenRef = useRef<string | null | undefined>(undefined);
   const initializationStartedRef = useRef(false);
 
   const applyAuthResult = useCallback((result: PartnerAuthResult) => {
@@ -262,18 +253,14 @@ export default function PartnerPage() {
   }, []);
 
   const initialize = useCallback(async () => {
-    if (tokenRef.current === undefined) {
-      tokenRef.current = readFragmentToken();
-      if (window.location.hash) clearFragment();
-    }
+    const token = readFragmentToken();
 
     setScreen('loading');
     setError('');
     try {
-      const result = tokenRef.current
-        ? await bootstrapPartnerInvitation(tokenRef.current)
+      const result = token
+        ? await bootstrapPartnerInvitation(token)
         : await logoutPartner();
-      tokenRef.current = null;
       applyAuthResult(result);
     } catch (initialError) {
       if (isAccountabilityApiError(initialError)
@@ -629,7 +616,7 @@ export default function PartnerPage() {
           <section className="partner-card is-centered" data-testid="partner-link-unavailable">
             <div className="partner-state-icon" aria-hidden="true">×</div>
             <h1>This link is unavailable</h1>
-            <p>Open the original invitation link to use Partner Access on this browser.</p>
+            <p>Open the full partner invitation, including the part after the #.</p>
           </section>
         ) : null}
 
