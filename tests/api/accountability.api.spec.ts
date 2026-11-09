@@ -394,10 +394,10 @@ describe('Accountability partner API', () => {
     await partner.json<{ error: string }>('/api/accountability/notes', {}, 401);
   });
 
-  test('blocks owner changes permanently and requires the existing PIN when reopening the original link', async () => {
+  test('requires the existing PIN when reopening the original link and blocks unauthenticated replacement', async () => {
     const { owner, partner, token, pin } = await establishPartner();
     await owner.json('/api/accountability/access', { method: 'POST' }, 409);
-    expect((await owner.request('/api/accountability/access/rotate', { method: 'POST' })).status).toBe(404);
+    await owner.json('/api/accountability/access/replace', { method: 'POST' }, 403);
     expect((await owner.request('/api/accountability/access', { method: 'DELETE' })).status).toBe(404);
     expect(await owner.json('/api/accountability/access')).toEqual({ state: 'active', claimedAt: expect.any(Number) });
 
@@ -413,6 +413,32 @@ describe('Accountability partner API', () => {
     await partner.json('/api/accountability/notes', {}, 401);
     expect((await dbPool.query('SELECT 1 FROM accountability_sessions')).rowCount).toBe(0);
     expect(await login(partner, token, pin)).toEqual({ state: 'authenticated' });
+  });
+
+  test('replaces the single invitation and revokes active sessions only with the management key', async () => {
+    const previousKey = process.env.PARTNER_MANAGEMENT_KEY;
+    const managementKey = 'test-only-partner-management-key-32-characters';
+    process.env.PARTNER_MANAGEMENT_KEY = managementKey;
+    try {
+      const { owner, partner, token } = await establishPartner();
+      const path = '/api/accountability/access/replace';
+      const request = { method: 'POST', body: JSON.stringify({ managementKey }) };
+      await owner.json(path, { ...request, headers: { Origin: 'https://example.com' } }, 403);
+      await owner.json(path, { ...request, body: JSON.stringify({ managementKey: 'wrong' }) }, 403);
+      await partner.json('/api/accountability/notes');
+      const replacement = await owner.json<{ state: AccessState; token: string }>(path, request);
+      expect(replacement.state).toBe('awaiting_setup');
+      expect(replacement.token).not.toBe(token);
+      await partner.json('/api/accountability/notes', {}, 401);
+      await bootstrap(new ApiClient(), token, 'revoked');
+      const newPartner = new ApiClient();
+      await bootstrap(newPartner, replacement.token);
+      await claim(newPartner);
+      await owner.json('/api/accountability/access', { method: 'POST' }, 409);
+    } finally {
+      if (previousKey === undefined) delete process.env.PARTNER_MANAGEMENT_KEY;
+      else process.env.PARTNER_MANAGEMENT_KEY = previousKey;
+    }
   });
 
   test('returns only minimal metadata for live locked notes and blocks locked content and lock shortening', async () => {

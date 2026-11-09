@@ -21,6 +21,7 @@ function getManagementError(error: unknown): string {
   if (!isAccountabilityApiError(error)) return 'Something went wrong. Please try again.';
   if (error.code === 'network_error') return 'Could not reach the server. Check your connection and try again.';
   if (error.code === 'invalid_response') return 'The server returned an unexpected response. Please try again.';
+  if (error.code === 'invalid_management_key') return 'That management key is incorrect.';
   return 'Could not load or create partner access. Please try again.';
 }
 
@@ -49,6 +50,9 @@ async function copyText(value: string): Promise<boolean> {
 export function PartnerAccessPanel({ onClose }: PartnerAccessPanelProps) {
   const [status, setStatus] = useState<AccountabilityAccessState | null>(null);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
+  const [canReplace, setCanReplace] = useState(false);
+  const [showReplace, setShowReplace] = useState(false);
+  const [managementKey, setManagementKey] = useState('');
   const [isBusy, setIsBusy] = useState(false);
   const [isIssuingLink, setIsIssuingLink] = useState(false);
   const [error, setError] = useState('');
@@ -66,11 +70,9 @@ export function PartnerAccessPanel({ onClose }: PartnerAccessPanelProps) {
     if (!silent) setIsBusy(true);
     try {
       const access = await getAccountabilityAccess();
+      if (isIssuingLinkRef.current && silent) return;
       setStatus(access.state);
-      if (access.state === 'active') {
-        setShareUrl(null);
-        setNotice('');
-      }
+      setCanReplace(access.canReplace);
       if (!silent) setError('');
     } catch (loadError) {
       if (!silent) setError(getManagementError(loadError));
@@ -121,15 +123,19 @@ export function PartnerAccessPanel({ onClose }: PartnerAccessPanelProps) {
     return () => window.clearInterval(poll);
   }, [loadStatus, status]);
 
-  const issueLink = async () => {
+  const issueLink = async (key?: string) => {
+    if (isIssuingLinkRef.current) return;
+    isIssuingLinkRef.current = true;
     setIsBusy(true);
     setIsIssuingLink(true);
     setError('');
     setNotice('');
     try {
-      const created = await createAccountabilityAccess();
+      const created = await createAccountabilityAccess(key);
       setStatus(created.state);
       setShareUrl(created.shareUrl);
+      setShowReplace(false);
+      setManagementKey('');
       const copied = await copyText(created.shareUrl);
       setNotice(copied
         ? 'New partner link copied. Send it directly to your accountability partner.'
@@ -141,6 +147,7 @@ export function PartnerAccessPanel({ onClose }: PartnerAccessPanelProps) {
         setError(getManagementError(issueError));
       }
     } finally {
+      isIssuingLinkRef.current = false;
       setIsBusy(false);
       setIsIssuingLink(false);
     }
@@ -202,7 +209,7 @@ export function PartnerAccessPanel({ onClose }: PartnerAccessPanelProps) {
         <p className="accountability-panel-description">
           {status === 'active'
             ? 'Your partner has set their PIN. They can use the original invitation to sign in and unlock notes for you.'
-            : 'You can create one permanent invitation. Send it to your partner before closing this panel so they can set their own six-digit PIN.'}
+            : 'Send your private invitation to your partner so they can set their own six-digit PIN.'}
         </p>
 
         <div className="accountability-status-row" aria-live="polite">
@@ -261,6 +268,44 @@ export function PartnerAccessPanel({ onClose }: PartnerAccessPanelProps) {
           >
             {isBusy ? 'Creating…' : 'Create partner link'}
           </button>
+        ) : null}
+
+        {canReplace && status && status !== 'none' && !showReplace ? (
+          <button
+            type="button"
+            className="accountability-button is-secondary is-full"
+            disabled={isBusy}
+            onClick={() => setShowReplace(true)}
+          >
+            Replace partner link
+          </button>
+        ) : null}
+
+        {showReplace ? (
+          <form className="accountability-share-card" onSubmit={(event) => {
+            event.preventDefault();
+            void issueLink(managementKey);
+          }}>
+            <p>Replacing the link disables the old link, signs out your partner, and requires them to set a new PIN.</p>
+            <label htmlFor="partner-management-key">Partner management key</label>
+            <input
+              id="partner-management-key"
+              type="password"
+              autoComplete="off"
+              value={managementKey}
+              onChange={(event) => setManagementKey(event.target.value)}
+              required
+            />
+            <div className="accountability-button-row">
+              <button type="button" className="accountability-button is-secondary" disabled={isBusy} onClick={() => {
+                setShowReplace(false);
+                setManagementKey('');
+              }}>Cancel</button>
+              <button type="submit" className="accountability-button" disabled={isBusy || !managementKey}>
+                {isBusy ? 'Replacing…' : 'Replace and create new link'}
+              </button>
+            </div>
+          </form>
         ) : null}
 
       </section>

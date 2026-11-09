@@ -368,7 +368,11 @@ export function createAccountabilityRouter(dependencies: AccountabilityDependenc
   router.get('/access', async (_req, res) => {
     try {
       const row = await getAccess(dependencies.getPool());
-      res.json(accessOwnerState(row));
+      const key = process.env.PARTNER_MANAGEMENT_KEY;
+      res.json({
+        ...accessOwnerState(row),
+        ...(key && key.length >= 32 ? { canReplace: true } : {}),
+      });
     } catch {
       logRouteFailure('get access');
       res.status(500).json({ error: 'server_error' });
@@ -394,6 +398,47 @@ export function createAccountabilityRouter(dependencies: AccountabilityDependenc
       res.json({ state: 'awaiting_setup', token });
     } catch {
       logRouteFailure('create access');
+      res.status(500).json({ error: 'server_error' });
+    }
+  });
+
+  router.post('/access/replace', requireSameOrigin, async (req, res) => {
+    const key = process.env.PARTNER_MANAGEMENT_KEY;
+    const suppliedKey = req.body?.managementKey;
+    if (!key || key.length < 32 || typeof suppliedKey !== 'string'
+      || !hashesMatch(hashToken(suppliedKey), hashToken(key))) {
+      res.status(403).json({ error: 'invalid_management_key' });
+      return;
+    }
+
+    const token = randomToken();
+    try {
+      const client = await dependencies.getPool().connect();
+      try {
+        await client.query('BEGIN');
+        const result = await client.query(
+          `UPDATE accountability_access
+           SET invite_token_hash = $2, pin_hash = NULL, claimed_at = NULL,
+               failed_attempts = 0, rate_limited_until = NULL, updated_at = $3
+           WHERE id = $1 RETURNING id`,
+          [ACCESS_ID, hashToken(token), Date.now()],
+        );
+        if (!result.rowCount) {
+          await client.query('ROLLBACK');
+          res.status(404).json({ error: 'access_not_found' });
+          return;
+        }
+        await client.query('DELETE FROM accountability_sessions WHERE access_id = $1', [ACCESS_ID]);
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+      res.json({ state: 'awaiting_setup', token });
+    } catch {
+      logRouteFailure('replace access');
       res.status(500).json({ error: 'server_error' });
     }
   });

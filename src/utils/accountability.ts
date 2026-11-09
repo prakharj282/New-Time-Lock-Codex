@@ -9,6 +9,7 @@ export type PartnerAuthState =
 export interface AccountabilityAccess {
   state: AccountabilityAccessState;
   claimedAt: number | null;
+  canReplace: boolean;
 }
 
 export interface CreatedAccountabilityAccess {
@@ -162,11 +163,15 @@ export async function getAccountabilityAccess(): Promise<AccountabilityAccess> {
   return {
     state: normalizeAccessState(payload),
     claimedAt: normalizeEpoch(payload.claimedAt),
+    canReplace: payload.canReplace === true,
   };
 }
 
-export async function createAccountabilityAccess(): Promise<CreatedAccountabilityAccess> {
-  const payload = await request('/access', { method: 'POST', body: jsonBody({}) });
+export async function createAccountabilityAccess(managementKey?: string): Promise<CreatedAccountabilityAccess> {
+  const payload = await request(managementKey ? '/access/replace' : '/access', {
+    method: 'POST',
+    body: jsonBody(managementKey ? { managementKey } : {}),
+  });
   const token = typeof payload.token === 'string' ? payload.token : '';
   const shareUrl = typeof payload.shareUrl === 'string'
     ? payload.shareUrl
