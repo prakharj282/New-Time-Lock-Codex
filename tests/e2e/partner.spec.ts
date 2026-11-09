@@ -53,7 +53,7 @@ test.describe.serial('Accountability partner flow', () => {
     await closeE2eDb();
   });
 
-  test('partner claims a fragment link and unlocks the note in the open owner UI', async ({ browser, page }) => {
+  test('partner claims the link and unlocks a timer during an active schedule', async ({ browser, page }) => {
     await page.goto('/');
     await page.getByTestId('partner-access-open').click();
     await expect(page.getByTestId('partner-access-panel')).toBeVisible();
@@ -87,6 +87,20 @@ test.describe.serial('Accountability partner flow', () => {
     await noteCard(page, title).click();
     await expect(page.getByText('Note is Locked')).toBeVisible();
     await expect(page.getByTestId('note-content-input')).toHaveCount(0);
+
+    // A timer can coexist with a recurring schedule, even though only one lock is shown.
+    const now = Date.now();
+    const utcTime = (offsetMinutes: number) =>
+      new Date(now + offsetMinutes * 60_000).toISOString().slice(11, 16);
+    await pool.query('UPDATE notes SET schedule = $1 WHERE id = $2', [
+      JSON.stringify({
+        enabled: true,
+        days: [0, 1, 2, 3, 4, 5, 6],
+        slots: [{ start: utcTime(-5), end: utcTime(20) }],
+        timezone: 'UTC',
+      }),
+      noteId,
+    ]);
 
     const partnerContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const partner = await partnerContext.newPage();
@@ -145,6 +159,16 @@ test.describe.serial('Accountability partner flow', () => {
       await expect(page.getByTestId('note-content-input')).toBeVisible({ timeout: 7_000 });
       await expect(page.getByTestId('note-content-input')).toHaveValue(body);
       await expect(page.getByText('Note is Locked')).toHaveCount(0);
+
+      const scheduleRefresh = await page.request.post('/api/notes/apply-schedules', {
+        data: { timezone: 'UTC' },
+      });
+      expect(scheduleRefresh.ok()).toBeTruthy();
+      const { notes } = await scheduleRefresh.json();
+      expect(notes).toContainEqual(expect.objectContaining({ id: noteId, lockedUntil: null }));
+      await partner.getByTestId('partner-notes-refresh').click();
+      await expect(partner.getByTestId('partner-notes-empty')).toBeVisible();
+      await expect(page.getByTestId('note-content-input')).toHaveValue(body);
 
       await partner.getByTestId('partner-settings-open').click();
       await partner.getByTestId('partner-current-pin').fill('012345');

@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { Pool } from 'pg';
 import { createPgPool, quoteIdent, withSearchPath } from '../helpers/db';
 
@@ -99,20 +99,26 @@ function futureMs(minutes = 60) {
   return Date.now() + minutes * 60_000;
 }
 
-function currentScheduleWindow() {
+function currentScheduleWindow(timezone = Intl.DateTimeFormat().resolvedOptions().timeZone) {
   const now = new Date();
   const start = new Date(now.getTime() - 2 * 60_000);
   const end = new Date(now.getTime() + 15 * 60_000);
-  const format = (date: Date) =>
-    `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
-  const slots = [{ start: format(start), end: format(end) }];
+  const clock = new Intl.DateTimeFormat('en-GB', {
+    timeZone: timezone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  });
+  const weekday = new Intl.DateTimeFormat('en-US', { timeZone: timezone, weekday: 'short' }).format(now);
+  const day = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(weekday);
+  const slots = [{ start: clock.format(start), end: clock.format(end) }];
 
   return {
     enabled: true,
-    days: [now.getDay()],
+    days: [day],
     slots,
-    perDay: { [now.getDay()]: slots },
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    perDay: { [day]: slots },
+    timezone,
   };
 }
 
@@ -553,6 +559,15 @@ describe('Accountability partner API', () => {
     expect((await dbPool.query('SELECT locked_until FROM notes WHERE id = $1', [timerId])).rows[0].locked_until)
       .toBeNull();
 
+    const staleRelock = await owner.json(`/api/notes/${timerId}/set-lock-until`, {
+      method: 'POST',
+      body: JSON.stringify({
+        timestamp: futureMs(120),
+        expectedUpdatedAt: Number(staleTimerState.updated_at),
+      }),
+    }, 409);
+    expect(staleRelock).toMatchObject({ error: 'lock_changed' });
+
     expect(await partner.json(`/api/accountability/notes/${timerId}/unlock`, { method: 'POST' }))
       .toEqual({ success: true, result: 'already_unlocked' });
     expect(await partner.json(`/api/accountability/notes/${alwaysId}/unlock`, { method: 'POST' }))
@@ -604,7 +619,7 @@ describe('Accountability partner API', () => {
     const owner = new ApiClient();
     const { partner } = await establishPartner();
     const scheduleId = `${runId}-schedule-unlock`;
-    const schedule = currentScheduleWindow();
+    const schedule = { ...currentScheduleWindow('UTC'), days: [0, 1, 2, 3, 4, 5, 6] };
     const saved = await saveNote(owner, scheduleId, 'Scheduled note', 'Scheduled secret', {
       schedule,
       restricted: true,
@@ -640,6 +655,130 @@ describe('Accountability partner API', () => {
     )).rows[0];
     expect(audit.lock_kind).toBe('schedule');
     expect(Number(audit.previous_locked_until)).toBe(activeWindowEnd);
+
+    const tomorrow = Date.now() + 24 * 60 * 60 * 1000;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(tomorrow);
+    try {
+      const nextWindow = await owner.json<{ notes: Array<{ id: string; lockedUntil: number | null }> }>(
+        '/api/notes/apply-schedules',
+        { method: 'POST', body: JSON.stringify({ timezone: 'UTC' }) },
+      );
+      expect(nextWindow.notes.find(note => note.id === scheduleId)?.lockedUntil).toBeGreaterThan(tomorrow);
+      await owner.json(`/api/notes/${scheduleId}/content`, {}, 423);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  test('keeps manual timer and always-locked notes open through an overlapping schedule window', async () => {
+    const { owner, partner } = await establishPartner();
+    const schedule = currentScheduleWindow('UTC');
+    const cases = [
+      { id: `${runId}-overlap-timer`, kind: 'timer', lockedUntil: futureMs(90) },
+      { id: `${runId}-overlap-always`, kind: 'always', lockedUntil: ALWAYS_LOCKED_UNTIL },
+    ];
+    for (const { id, kind, lockedUntil } of cases) {
+      await saveNote(owner, id, kind, 'Test secret', { schedule, lockedUntil, restricted: true });
+    }
+
+    const lockedNotes = (await partnerNotes(partner)).notes;
+    for (const { id, kind } of cases) {
+      expect(lockedNotes.find(note => note.id === id)?.lockKind).toBe(kind);
+      expect(await partner.json(`/api/accountability/notes/${id}/unlock`, { method: 'POST' }))
+        .toEqual({ success: true, result: 'unlocked' });
+    }
+
+    const applied = await owner.json<{ notes: Array<{ id: string; lockedUntil: number | null }> }>(
+      '/api/notes/apply-schedules',
+      { method: 'POST', body: JSON.stringify({ timezone: schedule.timezone }) },
+    );
+    const remaining = (await partnerNotes(partner)).notes;
+    for (const { id, kind } of cases) {
+      expect(applied.notes.find(note => note.id === id)?.lockedUntil).toBeNull();
+      expect(remaining.some(note => note.id === id)).toBe(false);
+      expect(await owner.json(`/api/notes/${id}/content`)).toEqual({ content: 'Test secret' });
+      const audit = (await dbPool.query(
+        'SELECT lock_kind, schedule_override_until FROM accountability_unlock_events WHERE note_id = $1',
+        [id],
+      )).rows[0];
+      expect(audit.lock_kind).toBe(kind);
+      expect(Number(audit.schedule_override_until)).toBeGreaterThan(Date.now());
+    }
+  });
+
+  test('uses the saved schedule timezone and preserves a legacy partner unlock when the owner timezone is learned', async () => {
+    const { owner, partner } = await establishPartner();
+    const schedule = currentScheduleWindow('UTC');
+    const legacyId = `${runId}-schedule-legacy-zone`;
+    const differentZoneId = `${runId}-schedule-saved-zone`;
+    const saved = await saveNote(owner, legacyId, 'Legacy schedule', 'Legacy secret', { schedule, restricted: true });
+    expect(saved.note.lockedUntil).toEqual(expect.any(Number));
+    await dbPool.query(`UPDATE notes SET schedule = schedule - 'timezone' WHERE id = $1`, [legacyId]);
+    await saveNote(owner, differentZoneId, 'Different schedule timezone', 'Other secret', {
+      schedule: { ...schedule, timezone: 'Pacific/Honolulu' },
+      restricted: true,
+    });
+
+    expect(await partner.json(`/api/accountability/notes/${legacyId}/unlock`, { method: 'POST' }))
+      .toEqual({ success: true, result: 'unlocked' });
+    const applied = await owner.json<{ notes: Array<{
+      id: string;
+      lockedUntil: number | null;
+      schedule: { timezone?: string };
+    }> }>('/api/notes/apply-schedules', { method: 'POST', body: JSON.stringify({ timezone: 'UTC' }) });
+
+    expect(applied.notes.find(note => note.id === differentZoneId)?.lockedUntil).toBeNull();
+    expect(applied.notes.find(note => note.id === legacyId)).toMatchObject({
+      lockedUntil: null,
+      schedule: { timezone: 'UTC' },
+    });
+    expect(await owner.json(`/api/notes/${legacyId}/content`)).toEqual({ content: 'Legacy secret' });
+  });
+
+  test('keeps a partner unlock when a stale note save was already waiting for the row lock', async () => {
+    const owner = new ApiClient();
+    const id = `${runId}-waiting-stale-save`;
+    const lockedUntil = futureMs();
+    await saveNote(owner, id, 'Timer', 'Original secret', { lockedUntil, restricted: true });
+
+    const unlock = await dbPool.connect();
+    let staleSave: Promise<unknown> | undefined;
+    try {
+      await unlock.query('BEGIN');
+      const { rows: [row] } = await unlock.query(
+        'SELECT updated_at, pg_backend_pid() AS pid FROM notes WHERE id = $1 FOR UPDATE', [id],
+      );
+      const unlockVersion = Math.max(Date.now(), Number(row.updated_at) + 1);
+      await unlock.query('UPDATE notes SET locked_until = NULL, updated_at = $2 WHERE id = $1', [id, unlockVersion]);
+      await unlock.query(
+        `INSERT INTO accountability_unlock_events (note_id, access_id, unlocked_at, lock_kind, previous_locked_until)
+         VALUES ($1, 1, $2, 'timer', $3)`,
+        [id, unlockVersion, lockedUntil],
+      );
+
+      staleSave = saveNote(owner, id, 'Stale timer', 'Stale secret', {
+        updatedAt: Number(row.updated_at),
+        lockedUntil,
+        restricted: true,
+      });
+      void staleSave.catch(() => undefined);
+      await expect.poll(async () => {
+        const blocked = await dbPool.query(
+          'SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))', [row.pid],
+        );
+        return blocked.rowCount;
+      }, { timeout: 5_000 }).toBeGreaterThan(0);
+      await unlock.query('COMMIT');
+    } catch (error) {
+      await unlock.query('ROLLBACK');
+      throw error;
+    } finally {
+      unlock.release();
+      await staleSave?.catch(() => undefined);
+    }
+
+    await staleSave;
+    expect(await owner.json(`/api/notes/${id}/content`)).toEqual({ content: 'Original secret' });
   });
 
   test('rejects cross-origin partner mutations and applies private response headers', async () => {

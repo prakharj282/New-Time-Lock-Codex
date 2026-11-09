@@ -140,10 +140,10 @@ export async function setEmergencyLength(id: string, newLength: number): Promise
   return data.success && typeof data.emergencyLength === 'number' ? data.emergencyLength : false;
 }
 
-export async function setLockUntil(id: string, timestamp: number): Promise<number | false> {
+export async function setLockUntil(id: string, timestamp: number, expectedUpdatedAt?: number): Promise<number | false> {
   const data = await api<{ success: boolean; lockedUntil?: number }>(`/notes/${id}/set-lock-until`, {
     method: 'POST',
-    body: JSON.stringify({ timestamp }),
+    body: JSON.stringify({ timestamp, expectedUpdatedAt }),
   });
   return data.success && typeof data.lockedUntil === 'number' ? data.lockedUntil : false;
 }

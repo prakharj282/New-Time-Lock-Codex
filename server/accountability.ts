@@ -326,23 +326,25 @@ function activeRateLimit(row: AccessRow): number | null {
   return retryAt > Date.now() ? retryAt : null;
 }
 
-function classifyLock(
+function getScheduleWindowEnd(
   row: LockedNoteRow,
   getActiveSlotEnd: AccountabilityDependencies['getActiveSlotEnd'],
-): { kind: LockKind; scheduleWindowEnd: number | null } {
-  const lockedUntil = Number(row.locked_until || 0);
-  if (lockedUntil >= ALWAYS_LOCKED_UNTIL) return { kind: 'always', scheduleWindowEnd: null };
-
+): number | null {
   const schedule = row.schedule;
-  if (schedule?.enabled) {
-    const computedEnd = getActiveSlotEnd(schedule, schedule.timezone)?.getTime() || 0;
-    // Scheduler-created lock timestamps can differ by seconds because the stored format
-    // has minute precision. A materially different timestamp is a timer lock.
-    if (computedEnd > Date.now() && Math.abs(computedEnd - lockedUntil) < 2 * 60 * 1000) {
-      return { kind: 'schedule', scheduleWindowEnd: lockedUntil };
-    }
+  // Legacy schedules get their timezone from the owner's next schedule check.
+  if (!schedule?.enabled || !schedule.timezone) return null;
+  const end = getActiveSlotEnd(schedule, schedule.timezone)?.getTime();
+  return end && end > Date.now() ? end : null;
+}
+
+function classifyLock(row: LockedNoteRow, scheduleWindowEnd: number | null): LockKind {
+  const lockedUntil = Number(row.locked_until || 0);
+  if (lockedUntil >= ALWAYS_LOCKED_UNTIL) return 'always';
+  // Older scheduled locks stored their deadline with an offset of up to a minute.
+  if (scheduleWindowEnd && Math.abs(scheduleWindowEnd - lockedUntil) < 2 * 60 * 1000) {
+    return 'schedule';
   }
-  return { kind: 'timer', scheduleWindowEnd: null };
+  return 'timer';
 }
 
 function logRouteFailure(operation: string): void {
@@ -705,7 +707,7 @@ export function createAccountabilityRouter(dependencies: AccountabilityDependenc
         [Date.now()],
       );
       const notes = (result.rows as LockedNoteRow[]).map((row) => {
-        const { kind } = classifyLock(row, dependencies.getActiveSlotEnd);
+        const kind = classifyLock(row, getScheduleWindowEnd(row, dependencies.getActiveSlotEnd));
         return {
           id: row.id,
           title: row.title,
@@ -766,19 +768,20 @@ export function createAccountabilityRouter(dependencies: AccountabilityDependenc
         return;
       }
 
-      const { kind, scheduleWindowEnd } = classifyLock(note, dependencies.getActiveSlotEnd);
+      const scheduleWindowEnd = getScheduleWindowEnd(note, dependencies.getActiveSlotEnd);
+      const kind = classifyLock(note, scheduleWindowEnd);
       const now = Math.max(Date.now(), Number(note.updated_at || 0) + 1);
       await client.query(
         `UPDATE notes
          SET locked_until = NULL, schedule_override_until = $1, updated_at = $2
          WHERE id = $3`,
-        [kind === 'schedule' ? scheduleWindowEnd : null, now, note.id],
+        [scheduleWindowEnd, now, note.id],
       );
       await client.query(
         `INSERT INTO accountability_unlock_events
           (note_id, access_id, unlocked_at, lock_kind, previous_locked_until, schedule_override_until)
          VALUES ($1, $2, $3, $4, $5, $6)`,
-        [note.id, ACCESS_ID, now, kind, previousLockedUntil, kind === 'schedule' ? scheduleWindowEnd : null],
+        [note.id, ACCESS_ID, now, kind, previousLockedUntil, scheduleWindowEnd],
       );
       await client.query('COMMIT');
       res.json({ success: true, result: 'unlocked' });

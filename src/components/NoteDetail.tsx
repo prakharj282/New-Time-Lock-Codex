@@ -60,6 +60,7 @@ export function NoteDetail({ note, isUnsaved, onBack, onNoteSaved }: NoteDetailP
 
     useEffect(() => {
         setLocalNote(prev => {
+            if ((note.updatedAt ?? 0) < (prev.updatedAt ?? 0)) return prev;
             const changes: Partial<AppNote> = {};
             if (note.lockedUntil !== prev.lockedUntil) changes.lockedUntil = note.lockedUntil;
             if (note.title !== prev.title) { changes.title = note.title; setTitle(note.title); }
@@ -71,27 +72,6 @@ export function NoteDetail({ note, isUnsaved, onBack, onNoteSaved }: NoteDetailP
             return prev;
         });
     }, [note.lockedUntil, note.title, note.schedule, note.updatedAt]);
-
-    useEffect(() => {
-        const checkSchedule = async () => {
-            if (localNote.schedule?.enabled && (!localNote.lockedUntil || localNote.lockedUntil <= Date.now())) {
-                try {
-                    const result = await store.applySchedules();
-                    if (result.updated) {
-                        const updated = result.notes.find(n => n.id === localNote.id);
-                        if (updated && updated.lockedUntil && updated.lockedUntil > Date.now()) {
-                            setLocalNote(prev => ({ ...prev, lockedUntil: updated.lockedUntil }));
-                        }
-                    }
-                } catch (err) {
-                    setError(store.getErrorMessage(err, 'Could not apply schedule lock.'));
-                }
-            }
-        };
-        checkSchedule();
-        const interval = setInterval(checkSchedule, 10_000);
-        return () => clearInterval(interval);
-    }, [localNote.id, localNote.lockedUntil, localNote.schedule]);
 
     const [eoEnabled, setEoEnabled] = useState(note.emergencyOpenEnabled || false);
     const [eoPerWeek, setEoPerWeek] = useState(note.emergencyOpenPerWeek || 2);
@@ -232,7 +212,6 @@ export function NoteDetail({ note, isUnsaved, onBack, onNoteSaved }: NoteDetailP
             const result = await store.updateTitle(localNote.id, title);
             if (result.success) {
                 const savedNote = result.note || { ...localNote, title };
-                setLocalNote(savedNote);
                 onNoteSaved?.(savedNote);
             }
         } catch (err) {
@@ -367,14 +346,15 @@ export function NoteDetail({ note, isUnsaved, onBack, onNoteSaved }: NoteDetailP
                 return;
             }
             try {
-                newLockedUntil = await store.setLockUntil(localNote.id, targetTs);
+                newLockedUntil = await store.setLockUntil(localNote.id, targetTs, localNote.updatedAt);
             } catch (err) {
                 setError(store.getErrorMessage(err, 'Failed to set lock.'));
                 return;
             }
         }
         if (newLockedUntil) {
-            setLocalNote({ ...localNote, lockedUntil: newLockedUntil });
+            const lockedUntil = newLockedUntil;
+            setLocalNote(prev => prev.updatedAt === localNote.updatedAt ? { ...prev, lockedUntil } : prev);
         }
         setCurrentView('detail');
         setExtendHours('1');
@@ -390,7 +370,7 @@ export function NoteDetail({ note, isUnsaved, onBack, onNoteSaved }: NoteDetailP
         try {
             const result = await store.setEmergencyLength(localNote.id, newGibberishLength);
             if (result) {
-                setLocalNote({ ...localNote, emergencyLength: result });
+                setLocalNote(prev => ({ ...prev, emergencyLength: result }));
             }
             setCurrentView('detail');
         } catch (err) {

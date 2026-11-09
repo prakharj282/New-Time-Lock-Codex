@@ -69,6 +69,14 @@ function App() {
     });
   }, []);
 
+  const adoptSavedNote = (savedNote: AppNote) => {
+    setNotes(prev => {
+      const current = prev.find(note => note.id === savedNote.id);
+      if ((current?.updatedAt ?? 0) > (savedNote.updatedAt ?? 0)) return prev;
+      return [savedNote, ...prev.filter(note => note.id !== savedNote.id)];
+    });
+  };
+
   const loadNotes = useCallback(async () => {
     try {
       const loadedNotes = await store.getNotes();
@@ -87,7 +95,7 @@ function App() {
       store.saveLastKnownTime();
     }, 60_000);
 
-    // Schedule enforcement — check every 30s
+    // Keep schedule enforcement in one place for the list and the open note.
     const scheduleInterval = setInterval(async () => {
       if (!hasScheduledNotes()) return;
       try {
@@ -98,7 +106,7 @@ function App() {
       } catch (err) {
         setAppError(store.getErrorMessage(err, 'Could not apply schedules.'));
       }
-    }, 30_000);
+    }, 10_000);
 
     // Also check schedules immediately
     const immediateSchedule = setTimeout(async () => {
@@ -211,7 +219,6 @@ function App() {
       emergencyOpenPerWeek: 0,
       emergencyOpenLog: [],
       schedule: { enabled: false, days: [], slots: [] },
-      updatedAt: now,
       deletedAt: null,
       restricted: false,
     };
@@ -279,9 +286,7 @@ function App() {
           <NoteDetail
             note={activeNote}
             isUnsaved={unsavedNoteIds.has(activeNoteId!)}
-            onNoteSaved={(savedNote) => {
-              setNotes(prev => [savedNote, ...prev.filter(note => note.id !== savedNote.id)]);
-            }}
+            onNoteSaved={adoptSavedNote}
             onBack={(savedNote) => {
               const noteId = activeNoteId!;
               setUnsavedNoteIds(prev => {
@@ -291,7 +296,7 @@ function App() {
                 return next;
               });
               if (savedNote) {
-                setNotes(prev => [savedNote, ...prev.filter(note => note.id !== savedNote.id)]);
+                adoptSavedNote(savedNote);
               }
               setActiveNoteId(null);
               if (!savedNote) {

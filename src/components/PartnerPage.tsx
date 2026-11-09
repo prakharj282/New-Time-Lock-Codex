@@ -231,6 +231,7 @@ export default function PartnerPage() {
   const [pendingUnlock, setPendingUnlock] = useState<PartnerNote | null>(null);
   const [unlockingId, setUnlockingId] = useState<string | null>(null);
   const initializationStartedRef = useRef(false);
+  const notesRequestId = useRef(0);
 
   const applyAuthResult = useCallback((result: PartnerAuthResult) => {
     setError('');
@@ -401,15 +402,17 @@ export default function PartnerPage() {
   }, [resolveLostSession]);
 
   const loadNotes = useCallback(async (silent: boolean) => {
+    const requestId = ++notesRequestId.current;
     if (!silent) setNotesLoading(true);
     try {
       const nextNotes = await getPartnerNotes();
+      if (requestId !== notesRequestId.current) return;
       setNotes(nextNotes);
       setError('');
     } catch (loadError) {
-      await handleProtectedError(loadError);
+      if (requestId === notesRequestId.current) await handleProtectedError(loadError);
     } finally {
-      if (!silent) setNotesLoading(false);
+      if (requestId === notesRequestId.current) setNotesLoading(false);
     }
   }, [handleProtectedError]);
 
@@ -426,6 +429,7 @@ export default function PartnerPage() {
     window.addEventListener('focus', refreshWhenVisible);
     document.addEventListener('visibilitychange', refreshWhenVisible);
     return () => {
+      notesRequestId.current += 1;
       window.clearInterval(poll);
       window.removeEventListener('focus', refreshWhenVisible);
       document.removeEventListener('visibilitychange', refreshWhenVisible);
@@ -557,6 +561,7 @@ export default function PartnerPage() {
     setNotice('');
     try {
       const result = await unlockPartnerNote(note.id);
+      setNotes(previous => previous.filter(lockedNote => lockedNote.id !== note.id));
       setPendingUnlock(null);
       setNotice(result === 'unlocked'
         ? `“${note.title}” is unlocked for its owner.`

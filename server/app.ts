@@ -358,12 +358,7 @@ app.put('/api/notes/:id', async (req, res) => {
     await client.query('BEGIN');
     const existing = await client.query(
       `SELECT n.restricted, n.content, n.title, n.locked_until, n.schedule,
-              n.schedule_override_until, n.updated_at,
-              (
-                SELECT MAX(event.unlocked_at)
-                FROM accountability_unlock_events event
-                WHERE event.note_id = n.id
-              ) AS last_partner_unlocked_at
+              n.schedule_override_until, n.updated_at
        FROM notes n WHERE n.id = $1 FOR UPDATE`,
       [id]
     );
@@ -374,11 +369,14 @@ app.put('/api/notes/:id', async (req, res) => {
     const clientUpdatedAt = Number(note.updatedAt || 0);
     const scheduleOverrideActive = !!existingRow?.schedule_override_until
       && Number(existingRow.schedule_override_until) > now;
-    const partnerUnlockIsNewer = !!existingRow?.last_partner_unlocked_at
-      && Number(existingRow.last_partner_unlocked_at) > clientUpdatedAt;
-    const preservePartnerUnlock = !!existingRow
-      && Number(existingRow.updated_at) > clientUpdatedAt
-      && (partnerUnlockIsNewer || scheduleOverrideActive);
+    const staleNote = !!existingRow && Number(existingRow.updated_at) > clientUpdatedAt;
+    const legacySchedule: NoteSchedule | undefined = existingRow?.schedule?.enabled && !existingRow.schedule.timezone
+      ? existingRow.schedule
+      : undefined;
+    // A SELECT that waited for the row lock may have a snapshot older than the unlock event.
+    const lastPartnerUnlock = staleNote || legacySchedule ? await getLastPartnerUnlock(client, id) : null;
+    const partnerUnlockIsNewer = lastPartnerUnlock !== null && lastPartnerUnlock > clientUpdatedAt;
+    const preservePartnerUnlock = staleNote && (partnerUnlockIsNewer || scheduleOverrideActive);
     const preserveServerData = existingLocked || preservePartnerUnlock;
     const finalRestricted = existingRestricted || (note.restricted || false);
     const finalContent = preserveServerData ? existingRow.content : encryptedContent;
@@ -393,24 +391,24 @@ app.put('/api/notes/:id', async (req, res) => {
         lockedUntil = currentLockedUntil;
       }
     }
-    const schedule = preservePartnerUnlock
+    const requestedSchedule = preservePartnerUnlock
       ? (existingRow.schedule || { enabled: false, days: [], slots: [] })
       : (note.schedule || { enabled: false, days: [], slots: [] });
-
-    const tz = schedule.timezone || req.body.timezone;
-
-    if (schedule.enabled && !lockedUntil && !scheduleOverrideActive) {
-      if (isWithinSchedule(schedule, tz)) {
-        const slotEnd = getActiveSlotEnd(schedule, tz);
-        if (slotEnd) {
-          lockedUntil = slotEnd.getTime();
-        }
+    const schedule = withScheduleTimezone(requestedSchedule, existingRow?.schedule?.timezone || req.body.timezone);
+    let recoveredOverride: number | null = null;
+    if (!lockedUntil && !scheduleOverrideActive) {
+      const slotEnd = getActiveSlotEnd(schedule)?.getTime();
+      if (slotEnd && legacySchedule && lastPartnerUnlock !== null
+        && getActiveSlotEnd(legacySchedule, schedule.timezone, lastPartnerUnlock)?.getTime() === slotEnd) {
+        recoveredOverride = slotEnd;
+      } else if (slotEnd) {
+        lockedUntil = slotEnd;
       }
     }
 
     const result = await client.query(
-      `INSERT INTO notes (id, title, content, created_at, updated_at, locked_until, emergency_length, hide_typos, emergency_open_enabled, emergency_open_per_week, emergency_open_log, schedule, deleted_at, restricted)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      `INSERT INTO notes (id, title, content, created_at, updated_at, locked_until, emergency_length, hide_typos, emergency_open_enabled, emergency_open_per_week, emergency_open_log, schedule, deleted_at, restricted, schedule_override_until)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
        ON CONFLICT (id) DO UPDATE SET
          title = EXCLUDED.title,
          content = EXCLUDED.content,
@@ -422,6 +420,7 @@ app.put('/api/notes/:id', async (req, res) => {
          emergency_open_per_week = EXCLUDED.emergency_open_per_week,
          emergency_open_log = EXCLUDED.emergency_open_log,
          schedule = EXCLUDED.schedule,
+         schedule_override_until = COALESCE(EXCLUDED.schedule_override_until, notes.schedule_override_until),
          deleted_at = EXCLUDED.deleted_at,
          restricted = EXCLUDED.restricted
        RETURNING *`,
@@ -440,6 +439,7 @@ app.put('/api/notes/:id', async (req, res) => {
         JSON.stringify(schedule),
         note.deletedAt || null,
         finalRestricted,
+        recoveredOverride,
       ]
     );
     await client.query('COMMIT');
@@ -517,9 +517,12 @@ app.post('/api/notes/:id/extend-lock', async (req, res) => {
 
 app.post('/api/notes/:id/set-lock-until', async (req, res) => {
   try {
-    const { timestamp } = req.body;
+    const { timestamp, expectedUpdatedAt } = req.body;
     if (!Number.isSafeInteger(timestamp) || timestamp <= 0) {
       return res.status(400).json({ error: 'Invalid lock timestamp' });
+    }
+    if (expectedUpdatedAt !== undefined && (!Number.isSafeInteger(expectedUpdatedAt) || expectedUpdatedAt <= 0)) {
+      return res.status(400).json({ error: 'Invalid note version' });
     }
     const requestStartedAt = Date.now();
     const result = await getPool().query(
@@ -527,19 +530,25 @@ app.post('/api/notes/:id/set-lock-until', async (req, res) => {
        SET locked_until = $1, updated_at = GREATEST($2, updated_at + 1)
        WHERE id = $3
          AND (locked_until IS NULL OR locked_until <= $2 OR locked_until <= $1)
+         AND ($4::bigint IS NULL OR (updated_at = $4 AND locked_until > $2))
          AND NOT EXISTS (
            SELECT 1 FROM accountability_unlock_events event
            WHERE event.note_id = notes.id AND event.unlocked_at >= $2
          )
        RETURNING locked_until`,
-      [timestamp, requestStartedAt, req.params.id]
+      [timestamp, requestStartedAt, req.params.id, expectedUpdatedAt ?? null]
     );
     if (result.rows.length === 0) {
-      const existing = await getPool().query('SELECT locked_until FROM notes WHERE id = $1', [req.params.id]);
+      const existing = await getPool().query('SELECT locked_until, updated_at FROM notes WHERE id = $1', [req.params.id]);
       if (existing.rows.length === 0) return res.json({ success: false });
+      const note = existing.rows[0];
+      if (expectedUpdatedAt !== undefined
+        && (Number(note.updated_at) !== expectedUpdatedAt || Number(note.locked_until) <= requestStartedAt)) {
+        return res.status(409).json({ error: 'lock_changed' });
+      }
       return res.status(409).json({
         error: 'lock_cannot_be_shortened',
-        lockedUntil: Number(existing.rows[0].locked_until),
+        lockedUntil: Number(note.locked_until),
       });
     }
     res.json({ success: true, lockedUntil: timestamp });
@@ -634,32 +643,34 @@ app.post('/api/notes/apply-schedules', async (req, res) => {
     let anyUpdated = false;
 
     for (const row of result.rows) {
-      const schedule = row.schedule;
+      const originalSchedule: NoteSchedule | null = row.schedule;
+      const schedule = originalSchedule && withScheduleTimezone(originalSchedule, clientTimezone);
       if (!schedule?.enabled) continue;
 
-      const inWindow = isWithinSchedule(schedule, clientTimezone);
-      const isCurrentlyLocked = !!row.locked_until && Number(row.locked_until) > Date.now();
-      const hasActiveOverride = !!row.schedule_override_until
-        && Number(row.schedule_override_until) > Date.now();
+      const now = Date.now();
+      if (Number(row.locked_until) > now || Number(row.schedule_override_until) > now) continue;
 
-      if (inWindow && !isCurrentlyLocked && !hasActiveOverride) {
-        const slotEnd = getActiveSlotEnd(schedule, clientTimezone);
-        if (slotEnd) {
-          const updateStartedAt = Date.now();
-          const updated = await getPool().query(
-            `UPDATE notes
-             SET locked_until = $1,
-                 schedule_override_until = NULL,
-                 updated_at = GREATEST($2, updated_at + 1)
-             WHERE id = $3
-               AND (locked_until IS NULL OR locked_until <= $2)
-               AND (schedule_override_until IS NULL OR schedule_override_until <= $2)
-             RETURNING id`,
-            [slotEnd.getTime(), updateStartedAt, row.id]
-          );
-          if (updated.rows.length > 0) anyUpdated = true;
-        }
-      }
+      const slotEnd = getActiveSlotEnd(schedule, undefined, now)?.getTime();
+      if (!slotEnd) continue;
+
+      // A pre-timezone schedule can identify its active slot once the owner supplies a timezone.
+      const lastPartnerUnlock = originalSchedule?.timezone ? null : await getLastPartnerUnlock(getPool(), row.id);
+      const unlockedInThisSlot = lastPartnerUnlock !== null
+        && getActiveSlotEnd(schedule, undefined, lastPartnerUnlock)?.getTime() === slotEnd;
+      const updated = await getPool().query(
+        `UPDATE notes
+         SET locked_until = $1,
+             schedule_override_until = $2,
+             updated_at = GREATEST($3, updated_at + 1),
+             schedule = $4
+         WHERE id = $5 AND updated_at = $6 AND deleted_at IS NULL
+           AND (locked_until IS NULL OR locked_until <= $3)
+           AND (schedule_override_until IS NULL OR schedule_override_until <= $3)
+         RETURNING id`,
+        [unlockedInThisSlot ? null : slotEnd, unlockedInThisSlot ? slotEnd : null,
+          now, JSON.stringify(schedule), row.id, row.updated_at]
+      );
+      if (updated.rows.length > 0) anyUpdated = true;
     }
 
     const updatedResult = await getPool().query('SELECT * FROM notes WHERE deleted_at IS NULL ORDER BY created_at DESC');
@@ -697,26 +708,37 @@ app.get('/api/time/last-known', async (_req, res) => {
   }
 });
 
-function getTimeInTimezone(timezone: string): { day: number; hours: number; minutes: number } {
+async function getLastPartnerUnlock(db: PoolClient | Pool, noteId: string): Promise<number | null> {
+  const result = await db.query(
+    'SELECT unlocked_at FROM accountability_unlock_events WHERE note_id = $1 ORDER BY unlocked_at DESC LIMIT 1',
+    [noteId],
+  );
+  return result.rows.length ? Number(result.rows[0].unlocked_at) : null;
+}
+
+function withScheduleTimezone(schedule: NoteSchedule, timezone: unknown): NoteSchedule {
+  if (!schedule.enabled || schedule.timezone || typeof timezone !== 'string' || !timezone) return schedule;
+  return { ...schedule, timezone };
+}
+
+function getTimeInTimezone(timezone: string, instant: Date): { day: number; hours: number; minutes: number } {
   try {
-    const now = new Date();
     const parts = new Intl.DateTimeFormat('en-US', {
       timeZone: timezone,
       weekday: 'short',
       hour: 'numeric',
       minute: 'numeric',
       hour12: false,
-    }).formatToParts(now);
+    }).formatToParts(instant);
 
     const weekdayStr = parts.find(p => p.type === 'weekday')?.value || '';
     const dayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-    const day = dayMap[weekdayStr] ?? now.getDay();
+    const day = dayMap[weekdayStr] ?? instant.getDay();
     const hours = parseInt(parts.find(p => p.type === 'hour')?.value || '0');
     const minutes = parseInt(parts.find(p => p.type === 'minute')?.value || '0');
     return { day, hours, minutes };
   } catch {
-    const now = new Date();
-    return { day: now.getDay(), hours: now.getHours(), minutes: now.getMinutes() };
+    return { day: instant.getDay(), hours: instant.getHours(), minutes: instant.getMinutes() };
   }
 }
 
@@ -730,43 +752,14 @@ function getSlotsForDay(schedule: NoteSchedule, day: number): ScheduleSlot[] {
   return [];
 }
 
-function isWithinSchedule(schedule: NoteSchedule, timezone?: string): boolean {
-  if (!schedule || !schedule.enabled) return false;
-
-  const tz = timezone || schedule.timezone;
-  const time = tz ? getTimeInTimezone(tz) : (() => {
-    const now = new Date();
-    return { day: now.getDay(), hours: now.getHours(), minutes: now.getMinutes() };
-  })();
-
-  const slots = getSlotsForDay(schedule, time.day);
-  if (slots.length === 0) return false;
-
-  const nowMinutes = time.hours * 60 + time.minutes;
-
-  for (const slot of slots) {
-    const [startH, startM] = slot.start.split(':').map(Number);
-    const [endH, endM] = slot.end.split(':').map(Number);
-    const startMinutes = startH * 60 + startM;
-    const endMinutes = endH * 60 + endM;
-
-    if (startMinutes <= endMinutes) {
-      if (nowMinutes >= startMinutes && nowMinutes < endMinutes) return true;
-    } else {
-      if (nowMinutes >= startMinutes || nowMinutes < endMinutes) return true;
-    }
-  }
-  return false;
-}
-
-function getActiveSlotEnd(schedule: NoteSchedule, timezone?: string): Date | null {
+function getActiveSlotEnd(schedule: NoteSchedule, timezone?: string, now = Date.now()): Date | null {
   if (!schedule || !schedule.enabled) return null;
 
   const tz = timezone || schedule.timezone;
-  const time = tz ? getTimeInTimezone(tz) : (() => {
-    const now = new Date();
-    return { day: now.getDay(), hours: now.getHours(), minutes: now.getMinutes() };
-  })();
+  const instant = new Date(now);
+  const time = tz ? getTimeInTimezone(tz, instant) : {
+    day: instant.getDay(), hours: instant.getHours(), minutes: instant.getMinutes(),
+  };
 
   const slots = getSlotsForDay(schedule, time.day);
   if (slots.length === 0) return null;
@@ -787,14 +780,13 @@ function getActiveSlotEnd(schedule: NoteSchedule, timezone?: string): Date | nul
     }
 
     if (isInSlot) {
-      const now = Date.now();
       let minutesUntilEnd: number;
       if (endMinutes > nowMinutes) {
         minutesUntilEnd = endMinutes - nowMinutes;
       } else {
         minutesUntilEnd = (24 * 60 - nowMinutes) + endMinutes;
       }
-      return new Date(now + minutesUntilEnd * 60 * 1000);
+      return new Date(Math.floor(now / 60_000) * 60_000 + minutesUntilEnd * 60_000);
     }
   }
   return null;
