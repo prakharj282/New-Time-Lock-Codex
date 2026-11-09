@@ -4,16 +4,12 @@ import {
   createAccountabilityAccess,
   getAccountabilityAccess,
   isAccountabilityApiError,
-  revokeAccountabilityAccess,
-  rotateAccountabilityAccess,
 } from '../utils/accountability';
 import '../accountability.css';
 
 export interface PartnerAccessPanelProps {
   onClose: () => void;
 }
-
-type ConfirmAction = 'rotate' | 'revoke' | null;
 
 const STATUS_LABELS: Record<AccountabilityAccessState, string> = {
   none: 'Not configured',
@@ -25,7 +21,7 @@ function getManagementError(error: unknown): string {
   if (!isAccountabilityApiError(error)) return 'Something went wrong. Please try again.';
   if (error.code === 'network_error') return 'Could not reach the server. Check your connection and try again.';
   if (error.code === 'invalid_response') return 'The server returned an unexpected response. Please try again.';
-  return 'Partner access could not be updated. Please try again.';
+  return 'Could not load or create partner access. Please try again.';
 }
 
 async function copyText(value: string): Promise<boolean> {
@@ -57,29 +53,24 @@ export function PartnerAccessPanel({ onClose }: PartnerAccessPanelProps) {
   const [isIssuingLink, setIsIssuingLink] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   const panelRef = useRef<HTMLElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
-  const confirmCancelButtonRef = useRef<HTMLButtonElement>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
   const isIssuingLinkRef = useRef(false);
-  const confirmActionRef = useRef<ConfirmAction>(null);
 
   useEffect(() => {
     isIssuingLinkRef.current = isIssuingLink;
   }, [isIssuingLink]);
-
-  useEffect(() => {
-    confirmActionRef.current = confirmAction;
-    if (confirmAction) confirmCancelButtonRef.current?.focus();
-  }, [confirmAction]);
 
   const loadStatus = useCallback(async (silent = false) => {
     if (!silent) setIsBusy(true);
     try {
       const access = await getAccountabilityAccess();
       setStatus(access.state);
-      if (access.state === 'active') setShareUrl(null);
+      if (access.state === 'active') {
+        setShareUrl(null);
+        setNotice('');
+      }
       if (!silent) setError('');
     } catch (loadError) {
       if (!silent) setError(getManagementError(loadError));
@@ -98,11 +89,7 @@ export function PartnerAccessPanel({ onClose }: PartnerAccessPanelProps) {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         if (isIssuingLinkRef.current) return;
-        if (confirmActionRef.current) {
-          setConfirmAction(null);
-        } else {
-          onClose();
-        }
+        onClose();
         return;
       }
 
@@ -134,16 +121,13 @@ export function PartnerAccessPanel({ onClose }: PartnerAccessPanelProps) {
     return () => window.clearInterval(poll);
   }, [loadStatus, status]);
 
-  const issueLink = async (rotate: boolean) => {
+  const issueLink = async () => {
     setIsBusy(true);
     setIsIssuingLink(true);
     setError('');
     setNotice('');
-    setConfirmAction(null);
     try {
-      const created = rotate
-        ? await rotateAccountabilityAccess()
-        : await createAccountabilityAccess();
+      const created = await createAccountabilityAccess();
       setStatus(created.state);
       setShareUrl(created.shareUrl);
       const copied = await copyText(created.shareUrl);
@@ -151,7 +135,11 @@ export function PartnerAccessPanel({ onClose }: PartnerAccessPanelProps) {
         ? 'New partner link copied. Send it directly to your accountability partner.'
         : 'New partner link created. Copy or share it before closing this panel.');
     } catch (issueError) {
-      setError(getManagementError(issueError));
+      if (isAccountabilityApiError(issueError) && issueError.code === 'access_exists') {
+        await loadStatus();
+      } else {
+        setError(getManagementError(issueError));
+      }
     } finally {
       setIsBusy(false);
       setIsIssuingLink(false);
@@ -184,23 +172,6 @@ export function PartnerAccessPanel({ onClose }: PartnerAccessPanelProps) {
     }
   };
 
-  const revoke = async () => {
-    setIsBusy(true);
-    setError('');
-    setNotice('');
-    try {
-      await revokeAccountabilityAccess();
-      setStatus('none');
-      setShareUrl(null);
-      setConfirmAction(null);
-      setNotice('Partner access revoked. Existing links and sessions no longer work.');
-    } catch (revokeError) {
-      setError(getManagementError(revokeError));
-    } finally {
-      setIsBusy(false);
-    }
-  };
-
   return (
     <div className="accountability-panel-backdrop" data-testid="partner-access-panel">
       <section
@@ -229,8 +200,9 @@ export function PartnerAccessPanel({ onClose }: PartnerAccessPanelProps) {
         </div>
 
         <p className="accountability-panel-description">
-          Your partner can use a private link and their own six-digit PIN to unlock a note for you.
-          You cannot set or view their PIN.
+          {status === 'active'
+            ? 'Your partner has set their PIN. They can use the original invitation to sign in and unlock notes for you.'
+            : 'You can create one permanent invitation. Send it to your partner before closing this panel so they can set their own six-digit PIN.'}
         </p>
 
         <div className="accountability-status-row" aria-live="polite">
@@ -284,73 +256,13 @@ export function PartnerAccessPanel({ onClose }: PartnerAccessPanelProps) {
             type="button"
             className="accountability-button is-full"
             disabled={isBusy}
-            onClick={() => void issueLink(false)}
+            onClick={() => void issueLink()}
             data-testid="partner-access-create"
           >
             {isBusy ? 'Creating…' : 'Create partner link'}
           </button>
         ) : null}
 
-        {status === 'awaiting_setup' || status === 'active' ? (
-          <div className="accountability-management-actions">
-            <button
-              type="button"
-              className="accountability-button is-secondary"
-              disabled={isBusy}
-              onClick={() => setConfirmAction('rotate')}
-              data-testid="partner-access-rotate"
-            >
-              Replace link
-            </button>
-            <button
-              type="button"
-              className="accountability-button is-danger-quiet"
-              disabled={isBusy}
-              onClick={() => setConfirmAction('revoke')}
-              data-testid="partner-access-revoke"
-            >
-              Revoke access
-            </button>
-          </div>
-        ) : null}
-
-        {confirmAction ? (
-          <div
-            className="accountability-confirm-box"
-            role="alertdialog"
-            aria-labelledby="partner-access-confirm-title"
-            aria-describedby="partner-access-confirm-description"
-          >
-            <strong id="partner-access-confirm-title">
-              {confirmAction === 'rotate' ? 'Replace partner access?' : 'Revoke partner access?'}
-            </strong>
-            <p id="partner-access-confirm-description">
-              {confirmAction === 'rotate'
-                ? 'The current link, PIN, and all signed-in partner sessions will stop working.'
-                : 'The current link, PIN, and all signed-in partner sessions will be invalidated.'}
-            </p>
-            <div className="accountability-button-row">
-              <button
-                ref={confirmCancelButtonRef}
-                type="button"
-                className="accountability-button is-secondary"
-                disabled={isBusy}
-                onClick={() => setConfirmAction(null)}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="accountability-button is-danger"
-                disabled={isBusy}
-                onClick={() => confirmAction === 'rotate' ? void issueLink(true) : void revoke()}
-                data-testid={`partner-access-${confirmAction}-confirm`}
-              >
-                {isBusy ? 'Working…' : confirmAction === 'rotate' ? 'Replace access' : 'Revoke access'}
-              </button>
-            </div>
-          </div>
-        ) : null}
       </section>
     </div>
   );

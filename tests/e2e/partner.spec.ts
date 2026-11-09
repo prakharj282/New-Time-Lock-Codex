@@ -25,6 +25,7 @@ test.describe.serial('Accountability partner flow', () => {
   const title = `${E2E_TITLE_PREFIX} ${runId} locked`;
   const body = `Partner-unlocked body created by ${runId}`;
   let pool: Pool;
+  let canCleanUpPartner = false;
 
   test.beforeAll(async ({ request }) => {
     const health = await request.get('/api/health');
@@ -35,14 +36,18 @@ test.describe.serial('Accountability partner flow', () => {
     const existing = await pool.query('SELECT 1 FROM accountability_access LIMIT 1');
     expect(
       existing.rowCount,
-      'The dedicated E2E database already has partner access configured. Revoke that test access before running this flow.'
+      'The dedicated E2E database must start without partner access.'
     ).toBe(0);
+    canCleanUpPartner = true;
   });
 
   test.afterAll(async () => {
-    await pool.query('DELETE FROM accountability_unlock_events WHERE access_id = 1');
-    await pool.query('DELETE FROM accountability_sessions WHERE access_id = 1');
-    await pool.query('DELETE FROM accountability_access WHERE id = 1');
+    if (!pool) return;
+    if (canCleanUpPartner) {
+      await pool.query('DELETE FROM accountability_unlock_events WHERE access_id = 1');
+      await pool.query('DELETE FROM accountability_sessions WHERE access_id = 1');
+      await pool.query('DELETE FROM accountability_access WHERE id = 1');
+    }
     await cleanupE2eNotes(pool);
     await pool.end();
     await closeE2eDb();
@@ -133,7 +138,7 @@ test.describe.serial('Accountability partner flow', () => {
       await partner.getByTestId('partner-new-pin').fill('654321');
       await partner.getByTestId('partner-new-pin-confirm').fill('654321');
       await partner.getByTestId('partner-settings-submit').click();
-      await expect(partner.getByRole('heading', { name: 'Locked notes' })).toBeVisible();
+      await expect(partner.getByRole('heading', { name: 'Locked notes', exact: true })).toBeVisible();
       await expect(partner.getByRole('status')).toContainText(/PIN changed/i);
 
       await partner.getByTestId('partner-logout').click();
@@ -143,7 +148,7 @@ test.describe.serial('Accountability partner flow', () => {
       await expect(partner.getByRole('alert')).toContainText(/PIN|accepted/i);
       await partner.getByTestId('partner-login-pin').fill('654321');
       await partner.getByTestId('partner-login-submit').click();
-      await expect(partner.getByRole('heading', { name: 'Locked notes' })).toBeVisible();
+      await expect(partner.getByRole('heading', { name: 'Locked notes', exact: true })).toBeVisible();
 
       await pool.query('DELETE FROM accountability_sessions WHERE access_id = 1');
       await partner.getByTestId('partner-notes-refresh').click();
@@ -151,18 +156,19 @@ test.describe.serial('Accountability partner flow', () => {
       await expect(partner.getByRole('status')).toContainText(/session expired/i);
       await partner.getByTestId('partner-login-pin').fill('654321');
       await partner.getByTestId('partner-login-submit').click();
-      await expect(partner.getByRole('heading', { name: 'Locked notes' })).toBeVisible();
+      await expect(partner.getByRole('heading', { name: 'Locked notes', exact: true })).toBeVisible();
 
       await page.getByRole('button', { name: 'Back' }).click();
       await page.getByTestId('partner-access-open').click();
-      await page.getByTestId('partner-access-revoke').click();
-      await page.getByTestId('partner-access-revoke-confirm').click();
-      await expect(page.getByTestId('partner-access-status')).toContainText(
-        /not set up|not configured|none|no partner/i
-      );
+      await expect(page.getByTestId('partner-access-status')).toHaveText('Active');
+      await expect(page.getByTestId('partner-access-panel').getByRole('button')).toHaveCount(1);
+      await expect(page.getByTestId('partner-share-url')).toHaveCount(0);
+      await page.goto(shareUrl);
+      await expect(page.getByTestId('partner-login-form')).toBeVisible();
+      await expect(page.getByTestId('partner-note-list')).toHaveCount(0);
 
-      await partner.getByTestId('partner-notes-refresh').click();
-      await expect(partner.getByTestId('partner-link-unavailable')).toBeVisible();
+      await partner.reload();
+      await expect(partner.getByTestId('partner-login-form')).toBeVisible();
     } finally {
       await partnerContext.close();
     }

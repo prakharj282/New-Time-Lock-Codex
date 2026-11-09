@@ -208,8 +208,7 @@
   box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.17);
 }
 
-.accountability-share-card p,
-.accountability-confirm-box p {
+.accountability-share-card p {
   margin: 9px 0 14px;
   color: var(--partner-muted);
   font-size: 12px;
@@ -217,7 +216,6 @@
 }
 
 .accountability-button-row,
-.accountability-management-actions,
 .partner-button-row {
   display: flex;
   align-items: center;
@@ -270,47 +268,14 @@
   color: var(--partner-text);
 }
 
-.accountability-button.is-danger,
 .partner-button.is-danger {
   background: linear-gradient(135deg, #f43f5e, #be123c);
   box-shadow: 0 8px 24px rgba(190, 18, 60, 0.22);
 }
 
-.accountability-button.is-danger-quiet {
-  border-color: rgba(251, 113, 133, 0.22);
-  background: rgba(190, 18, 60, 0.1);
-  box-shadow: none;
-  color: #fda4af;
-}
-
 .accountability-button.is-full,
 .partner-button.is-full {
   width: 100%;
-}
-
-.accountability-management-actions {
-  margin-top: 2px;
-}
-
-.accountability-management-actions > * {
-  flex: 1;
-}
-
-.accountability-confirm-box {
-  margin-top: 16px;
-  padding: 15px;
-  border: 1px solid rgba(251, 113, 133, 0.3);
-  border-radius: var(--partner-radius-sm);
-  background: rgba(136, 19, 55, 0.15);
-}
-
-.accountability-confirm-box strong {
-  color: var(--partner-text);
-  font-size: 14px;
-}
-
-.accountability-confirm-box .accountability-button-row {
-  justify-content: flex-end;
 }
 
 .partner-page {
@@ -748,14 +713,12 @@
     padding: 21px;
   }
 
-  .accountability-button-row,
-  .accountability-management-actions {
+  .accountability-button-row {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .accountability-button-row > *,
-  .accountability-management-actions > * {
+  .accountability-button-row > * {
     width: 100%;
   }
 

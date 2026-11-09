@@ -166,15 +166,7 @@ export async function getAccountabilityAccess(): Promise<AccountabilityAccess> {
 }
 
 export async function createAccountabilityAccess(): Promise<CreatedAccountabilityAccess> {
-  return issueAccountabilityAccess('/access');
-}
-
-export async function rotateAccountabilityAccess(): Promise<CreatedAccountabilityAccess> {
-  return issueAccountabilityAccess('/access/rotate');
-}
-
-async function issueAccountabilityAccess(path: string): Promise<CreatedAccountabilityAccess> {
-  const payload = await request(path, { method: 'POST', body: jsonBody({}) });
+  const payload = await request('/access', { method: 'POST', body: jsonBody({}) });
   const token = typeof payload.token === 'string' ? payload.token : '';
   const shareUrl = typeof payload.shareUrl === 'string'
     ? payload.shareUrl
@@ -182,10 +174,6 @@ async function issueAccountabilityAccess(path: string): Promise<CreatedAccountab
 
   if (!shareUrl) throw new AccountabilityApiError('invalid_response', 200);
   return { state: 'awaiting_setup', shareUrl };
-}
-
-export async function revokeAccountabilityAccess(): Promise<void> {
-  await request('/access', { method: 'DELETE' });
 }
 
 export async function bootstrapPartnerInvitation(token: string): Promise<PartnerAuthResult> {

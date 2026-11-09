@@ -272,7 +272,7 @@ export default function PartnerPage() {
     try {
       const result = tokenRef.current
         ? await bootstrapPartnerInvitation(tokenRef.current)
-        : await getPartnerSession();
+        : await logoutPartner();
       tokenRef.current = null;
       applyAuthResult(result);
     } catch (initialError) {
@@ -313,6 +313,21 @@ export default function PartnerPage() {
     initializationStartedRef.current = true;
     void initialize();
   }, [initialize]);
+
+  useEffect(() => {
+    const reopenInvitation = () => {
+      if (window.location.hash) window.location.reload();
+    };
+    const reopenFromHistory = (event: PageTransitionEvent) => {
+      if (event.persisted) window.location.reload();
+    };
+    window.addEventListener('hashchange', reopenInvitation);
+    window.addEventListener('pageshow', reopenFromHistory);
+    return () => {
+      window.removeEventListener('hashchange', reopenInvitation);
+      window.removeEventListener('pageshow', reopenFromHistory);
+    };
+  }, []);
 
   useEffect(() => {
     if (!retryUntil) return;
@@ -614,7 +629,7 @@ export default function PartnerPage() {
           <section className="partner-card is-centered" data-testid="partner-link-unavailable">
             <div className="partner-state-icon" aria-hidden="true">×</div>
             <h1>This link is unavailable</h1>
-            <p>It may be invalid, expired, or revoked. Ask the note owner to send you a new partner link.</p>
+            <p>Open the original invitation link to use Partner Access on this browser.</p>
           </section>
         ) : null}
 
@@ -643,7 +658,7 @@ export default function PartnerPage() {
                 testId="partner-setup-confirm"
                 autoComplete="new-password"
               />
-              <p className="partner-form-hint">Keep this PIN safe. A lost PIN can only be reset with a new link.</p>
+              <p className="partner-form-hint">Keep this PIN safe. It is required on each visit and cannot be recovered.</p>
               <button
                 type="submit"
                 className="partner-button is-full"

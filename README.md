@@ -26,7 +26,7 @@ If the app shows `API route not found (404)`, the frontend is running without th
 
 ## Accountability Partner Access
 
-Open **Partner** in the main-page header to create a one-time share link. The partner opens the separate `/partner` page, creates their own six-digit PIN, and can then see and unlock only notes that are currently locked. The owner cannot set, view, or reset that PIN; revoke or replace the link to recover from a lost PIN.
+Open **Partner** in the main-page header to create the permanent invitation. Copy and send it before closing the panel. The partner sets their own six-digit PIN on the separate `/partner` page and enters it on each new visit. The owner panel becomes read-only once the invitation is issued. After claim, only the partner can change the PIN, using their current PIN. A lost PIN cannot be recovered through the app.
 
 Partner invitation secrets stay in the URL fragment, PINs are stored only as salted `scrypt` hashes, and partner sessions use hashed random tokens in strict `HttpOnly` cookies. Unlocking a scheduled note bypasses only its current active window and leaves future recurrence enabled.
 

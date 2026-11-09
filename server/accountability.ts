@@ -350,6 +350,17 @@ function logRouteFailure(operation: string): void {
   console.error(`Accountability operation failed: ${operation}`);
 }
 
+async function endBrowserSession(pool: Pool, req: Request, res: Response): Promise<void> {
+  const token = cookieValue(req, SESSION_COOKIE);
+  if (isValidToken(token)) {
+    await pool.query(
+      'DELETE FROM accountability_sessions WHERE token_hash = $1',
+      [hashToken(token)],
+    );
+  }
+  clearCookie(res, SESSION_COOKIE);
+}
+
 export function createAccountabilityRouter(dependencies: AccountabilityDependencies): Router {
   const router = Router();
   router.use(setPartnerResponseHeaders);
@@ -387,56 +398,6 @@ export function createAccountabilityRouter(dependencies: AccountabilityDependenc
     }
   });
 
-  router.post('/access/rotate', requireSameOrigin, async (_req, res) => {
-    const token = randomToken();
-    const client = await dependencies.getPool().connect();
-    try {
-      await client.query('BEGIN');
-      await client.query('DELETE FROM accountability_sessions WHERE access_id = $1', [ACCESS_ID]);
-      const now = Date.now();
-      await client.query(
-        `INSERT INTO accountability_access
-          (id, invite_token_hash, pin_hash, claimed_at, failed_attempts, rate_limited_until, created_at, updated_at)
-         VALUES ($1, $2, NULL, NULL, 0, NULL, $3, $3)
-         ON CONFLICT (id) DO UPDATE SET
-           invite_token_hash = EXCLUDED.invite_token_hash,
-           pin_hash = NULL,
-           claimed_at = NULL,
-           failed_attempts = 0,
-           rate_limited_until = NULL,
-           updated_at = EXCLUDED.updated_at`,
-        [ACCESS_ID, hashToken(token), now],
-      );
-      await client.query('COMMIT');
-      res.json({ state: 'awaiting_setup', token });
-    } catch {
-      await client.query('ROLLBACK').catch(() => undefined);
-      logRouteFailure('rotate access');
-      res.status(500).json({ error: 'server_error' });
-    } finally {
-      client.release();
-    }
-  });
-
-  router.delete('/access', requireSameOrigin, async (_req, res) => {
-    const client = await dependencies.getPool().connect();
-    try {
-      await client.query('BEGIN');
-      await client.query('DELETE FROM accountability_sessions WHERE access_id = $1', [ACCESS_ID]);
-      await client.query('DELETE FROM accountability_access WHERE id = $1', [ACCESS_ID]);
-      await client.query('COMMIT');
-      clearCookie(res, INVITE_COOKIE);
-      clearCookie(res, SESSION_COOKIE);
-      res.json({ state: 'none' });
-    } catch {
-      await client.query('ROLLBACK').catch(() => undefined);
-      logRouteFailure('revoke access');
-      res.status(500).json({ error: 'server_error' });
-    } finally {
-      client.release();
-    }
-  });
-
   router.post('/bootstrap', requireSameOrigin, async (req, res) => {
     const token = req.body?.token;
     if (!isValidToken(token)) {
@@ -453,9 +414,9 @@ export function createAccountabilityRouter(dependencies: AccountabilityDependenc
         return;
       }
 
+      await endBrowserSession(dependencies.getPool(), req, res);
       setInviteCookie(res, token);
-      const session = await loadSession(dependencies.getPool(), req);
-      res.json({ state: session ? 'authenticated' : unauthenticatedPartnerState(access) });
+      res.json({ state: unauthenticatedPartnerState(access) });
     } catch {
       logRouteFailure('bootstrap');
       res.status(500).json({ error: 'server_error' });
@@ -595,14 +556,7 @@ export function createAccountabilityRouter(dependencies: AccountabilityDependenc
 
   router.post('/logout', requireSameOrigin, async (req, res) => {
     try {
-      const rawSession = cookieValue(req, SESSION_COOKIE);
-      if (isValidToken(rawSession)) {
-        await dependencies.getPool().query(
-          'DELETE FROM accountability_sessions WHERE token_hash = $1',
-          [hashToken(rawSession)],
-        );
-      }
-      clearCookie(res, SESSION_COOKIE);
+      await endBrowserSession(dependencies.getPool(), req, res);
       const access = await getAccess(dependencies.getPool());
       res.json({
         state: validInviteForAccess(req, access) ? unauthenticatedPartnerState(access) : 'revoked',

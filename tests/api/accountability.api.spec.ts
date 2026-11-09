@@ -227,6 +227,7 @@ describe('Accountability partner API', () => {
     expect(await owner.json<{ state: AccessState }>('/api/accountability/access')).toEqual({ state: 'none' });
 
     const { token } = await createInvite(owner);
+    await owner.json('/api/accountability/access', { method: 'POST' }, 409);
     const waiting = await owner.json<{ state: AccessState }>('/api/accountability/access');
     expect(waiting).toEqual({ state: 'awaiting_setup' });
     expect(JSON.stringify(waiting)).not.toContain(token);
@@ -393,33 +394,25 @@ describe('Accountability partner API', () => {
     await partner.json<{ error: string }>('/api/accountability/notes', {}, 401);
   });
 
-  test('rotating and revoking access invalidate prior invitation and session credentials', async () => {
-    const { owner, partner, token: oldToken } = await establishPartner();
+  test('blocks owner changes permanently and requires the existing PIN when reopening the original link', async () => {
+    const { owner, partner, token, pin } = await establishPartner();
+    await owner.json('/api/accountability/access', { method: 'POST' }, 409);
+    expect((await owner.request('/api/accountability/access/rotate', { method: 'POST' })).status).toBe(404);
+    expect((await owner.request('/api/accountability/access', { method: 'DELETE' })).status).toBe(404);
+    expect(await owner.json('/api/accountability/access')).toEqual({ state: 'active', claimedAt: expect.any(Number) });
 
-    const rotated = await owner.json<{ state: AccessState; token: string }>('/api/accountability/access/rotate', {
+    await bootstrap(owner, token, 'login_required');
+    await owner.json('/api/accountability/notes', {}, 401);
+    await owner.json('/api/accountability/claim', {
       method: 'POST',
-    });
-    expect(rotated.state).toBe('awaiting_setup');
-    expect(rotated.token).toMatch(/^[A-Za-z0-9_-]{43,}$/);
-    expect(rotated.token).not.toBe(oldToken);
+      body: JSON.stringify({ pin: '111111', pinConfirmation: '111111' }),
+    }, 409);
+    await partner.json('/api/accountability/notes');
+
+    await bootstrap(partner, token, 'login_required');
+    await partner.json('/api/accountability/notes', {}, 401);
     expect((await dbPool.query('SELECT 1 FROM accountability_sessions')).rowCount).toBe(0);
-
-    expect(await partner.json<{ state: PartnerState }>('/api/accountability/session')).toEqual({ state: 'revoked' });
-    const oldLink = new ApiClient();
-    await bootstrap(oldLink, oldToken, 'revoked');
-
-    const replacement = new ApiClient();
-    await bootstrap(replacement, rotated.token, 'setup_required');
-    await claim(replacement, '111111');
-
-    expect(await owner.json<{ state: AccessState }>('/api/accountability/access', {
-      method: 'DELETE',
-    })).toEqual({ state: 'none' });
-    expect(await replacement.json<{ state: PartnerState }>('/api/accountability/session')).toEqual({
-      state: 'revoked',
-    });
-    expect((await dbPool.query('SELECT 1 FROM accountability_access')).rowCount).toBe(0);
-    expect((await dbPool.query('SELECT 1 FROM accountability_sessions')).rowCount).toBe(0);
+    expect(await login(partner, token, pin)).toEqual({ state: 'authenticated' });
   });
 
   test('returns only minimal metadata for live locked notes and blocks locked content and lock shortening', async () => {
@@ -625,7 +618,7 @@ describe('Accountability partner API', () => {
 
   test('rejects cross-origin partner mutations and applies private response headers', async () => {
     const { partner } = await establishPartner();
-    const ownerMutation = await partner.request('/api/accountability/access/rotate', {
+    const ownerMutation = await partner.request('/api/accountability/access', {
       method: 'POST',
       headers: { Origin: 'https://attacker.example' },
     });
